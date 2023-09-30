@@ -12,24 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-scene_type = "synthetic"
-object_name = "chair"
-scene_dir = "datasets/nerf_synthetic/"+object_name
-
-# synthetic
-# chair drums ficus hotdog lego materials mic ship
-
-# forwardfacing
-# fern flower fortress horns leaves orchids room trex
-
-# real360
-# bicycle flowerbed gardenvase stump treehill
-# fulllivingroom kitchencounter kitchenlego officebonsai
-
 #%% --------------------------------------------------------------------------------
 # ## General imports
 #%%
+from commons import *
 import copy
 import gc
 import json
@@ -43,6 +29,7 @@ import jax.numpy as np
 from jax import random
 import flax
 import flax.linen as nn
+import optax
 import functools
 import math
 from typing import Sequence, Callable
@@ -52,11 +39,12 @@ from PIL import Image
 from multiprocessing.pool import ThreadPool
 
 print(jax.local_devices())
-if len(jax.local_devices())!=8:
-  print("ERROR: need 8 v100 GPUs")
-  1/0
-weights_dir = "weights"
-samples_dir = "samples"
+# if len(jax.local_devices())!=8:
+#   print("ERROR: need 8 v100 GPUs")
+#   1/0
+
+weights_dir = prefix + "weights"
+samples_dir = prefix + "samples"
 if not os.path.exists(weights_dir):
   os.makedirs(weights_dir)
 if not os.path.exists(samples_dir):
@@ -313,10 +301,12 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
 # ## Helper functions
 #%%
 adam_kwargs = {
-    'beta1': 0.9,
-    'beta2': 0.999,
+    'learning_rate': 0.1,
+    'b1': 0.9,
+    'b2': 0.999,
     'eps': 1e-15,
 }
+optimizer = optax.adam(**adam_kwargs)
 
 n_device = jax.local_device_count()
 
@@ -1217,7 +1207,6 @@ def compute_box_intersection(rays):
 #%% --------------------------------------------------------------------------------
 # ## MLP setup
 #%%
-num_bottleneck_features = 8
 
 
 def dense_layer(width):
@@ -1264,9 +1253,17 @@ class MLP(nn.Module):
 
 density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
-color_model = MLP([16,16,3])
+color_model = MLP([channel_width,channel_width,3])
 
-# These are the variables we will be optimizing during trianing.
+if VQ:
+  # containing all available features
+  codebook = np.zeros((quant_levels, num_bottleneck_features),dtype=grid_dtype)
+  # initialize randomly
+  codebook = random.normal(random.PRNGKey(0),(quant_levels, num_bottleneck_features),dtype=grid_dtype)
+  # output a soft index
+  feature_model = RadianceField(quant_levels)
+
+# These are the variables we will be optimizing during training.
 model_vars = [point_grid, acc_grid,
               density_model.init(
                   jax.random.PRNGKey(0),
@@ -1278,6 +1275,8 @@ model_vars = [point_grid, acc_grid,
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3+num_bottleneck_features])),
               ]
+if VQ:
+  model_vars.append(codebook)
 
 #avoid bugs
 point_grid = None
@@ -1310,7 +1309,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
     pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
 
   # Now use the MLP to compute density and features
-  mlp_alpha = density_model.apply(vars[-3], pts)
+  mlp_alpha = density_model.apply(vars[2], pts)
   mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
   mlp_alpha = mlp_alpha * grid_masks
 
@@ -1327,9 +1326,21 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   dirs = np.broadcast_to(dirs[..., None, :], pts.shape)
 
   #previous: (features+dirs)->MLP->(RGB)
-  mlp_features = jax.nn.sigmoid(feature_model.apply(vars[-2], pts))
+  # vector quantization if possible
+  if VQ:
+    y_soft = jax.nn.softmax(feature_model.apply(vars[3], pts), axis=-1)
+    N,P,C = y_soft.shape
+    y_soft = y_soft.reshape(-1,C)
+    index = y_soft.argmax(axis=-1)
+    y_hard = np.zeros_like(y_soft).at[[i for i in range(len(index))],index].set(1.0)
+    keys = y_hard - jax.lax.stop_gradient(y_soft) + y_soft
+    keys = keys.reshape(N,P,C)
+    mlp_features = jax.nn.sigmoid(np.matmul(keys, vars[5]))
+  else:
+    mlp_features = jax.nn.sigmoid(feature_model.apply(vars[3], pts))
+
   features_dirs_enc = np.concatenate([mlp_features, dirs], axis=-1)
-  colors = jax.nn.sigmoid(color_model.apply(vars[-1], features_dirs_enc))
+  colors = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc))
 
   rgb = np.sum(weights[..., None] * colors, axis=-2)
   rgb_b = np.sum(weights_b[..., None] * colors, axis=-2)
@@ -1433,11 +1444,11 @@ def compute_TV(acc_grid):
   TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
   return TV
 
-def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
+def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold, model_vars):
   key, rng = random.split(rng)
   rays, pixels = random_ray_batch(
       key, batch_size // n_device, traindata)
-
+  
   def loss_fn(vars):
     rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks = render_rays(
         rays, vars, keep_num, threshold, wbgcolor, rng)
@@ -1460,24 +1471,31 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     return loss_color_l2 + loss_distortion + loss_acc + point_loss, loss_color_l2
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (total_loss, color_loss_l2), grad = grad_fn(state.target)
+  (total_loss, color_loss_l2), grad = grad_fn(model_vars)
   total_loss = jax.lax.pmean(total_loss, axis_name='batch')
   color_loss_l2 = jax.lax.pmean(color_loss_l2, axis_name='batch')
 
   grad = jax.lax.pmean(grad, axis_name='batch')
-  state = state.apply_gradient(grad, learning_rate=lr)
-
-  return state, color_loss_l2
+  # state = state.apply_gradient(grad, learning_rate=lr)
+  # using optax
+  adam_kwargs = {'learning_rate': lr,'b1': 0.9,'b2': 0.999,'eps': 1e-15,}
+  optimizer = optax.adam(**adam_kwargs)
+  updates, state = optimizer.update(grad, state)
+  model_vars = optax.apply_updates(model_vars, updates)
+  
+  return state, color_loss_l2, model_vars
 
 train_pstep = jax.pmap(train_step, axis_name='batch',
-                       in_axes=(0, 0, 0, None, None, None, None, None, None, None),
+                       in_axes=(0, 0, 0, None, None, None, None, None, None, None, 0),
                        static_broadcasted_argnums = (7,8,))
 traindata_p = flax.jax_utils.replicate(data['train'])
-state = flax.optim.Adam(**adam_kwargs).create(model_vars)
+state = optimizer.init(model_vars)
 
-step_init = state.state.step
+step_init = 0#state.state.step
 state = flax.jax_utils.replicate(state)
+model_vars = flax.jax_utils.replicate(model_vars)
 print(f'starting at {step_init}')
+
 
 # Training loop
 psnrs = []
@@ -1488,13 +1506,17 @@ t_total = 0.0
 t_last = 0.0
 i_last = step_init
 
+# track loss
+psnr_module = AverageMeter()
+
 training_iters = 200000
 train_iters_cont = 300000
 if scene_type=="real360":
   training_iters = 300000
 
 print("Training")
-for i in tqdm(range(step_init, training_iters + 1)):
+train_iter = tqdm(range(step_init, training_iters + 1))
+for i in train_iter:
   t = time.time()
 
   lr = lr_fn(i,train_iters_cont, 1e-3, 1e-5)
@@ -1523,7 +1545,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
-  state, color_loss_l2 = train_pstep(
+  
+  state, color_loss_l2, model_vars = train_pstep(
       state, key2, traindata_p,
       lr,
       wdistortion,
@@ -1531,17 +1554,26 @@ for i in tqdm(range(step_init, training_iters + 1)):
       wbgcolor,
       batch_size,
       keep_num,
-      threshold
+      threshold,
+      model_vars
       )
 
   psnrs.append(-10. * np.log10(color_loss_l2[0]))
   iters.append(i)
 
+  # update modules
+  psnr_module.update(-10. * np.log10(color_loss_l2[0]),batch_size)
+
+  # show result
+  train_iter.set_description(
+      f"I:{i}. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
+
   if i > 0:
     t_total += time.time() - t
 
   # Logging
-  if (i % 10000 == 0) and i > 0:
+  if (i % 10000 == 0) and (i>0):
     gc.collect()
 
     unreplicated_state = flax.jax_utils.unreplicate(state)
@@ -1560,7 +1592,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('  %0.3f secs per iter.' % (t_elapsed / i_elapsed))
     print('  %0.3f iters per sec.' % (i_elapsed / t_elapsed))
 
-    vars = unreplicated_state.target
+    vars = flax.jax_utils.unreplicate(model_vars)
+    # change the model architecture here: bit width, channel width
     rays = camera_ray_batch(
         data['test']['c2w'][selected_test_index], data['test']['hwf'])
     gt = data['test']['images'][selected_test_index]

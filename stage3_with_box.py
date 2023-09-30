@@ -14,8 +14,8 @@
 
 
 scene_type = "real360"
-object_name = "gardenvase"
-scene_dir = "datasets/nerf_real_360/"+object_name
+object_name = "garden"
+scene_dir = "../dataset/nerf_360/"+object_name
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -52,9 +52,9 @@ from PIL import Image
 from multiprocessing.pool import ThreadPool
 
 print(jax.local_devices())
-if len(jax.local_devices())!=8:
-  print("ERROR: need 8 v100 GPUs")
-  1/0
+# if len(jax.local_devices())!=8:
+#   print("ERROR: need 8 v100 GPUs")
+#   1/0
 weights_dir = "weights"
 samples_dir = "samples"
 if not os.path.exists(weights_dir):
