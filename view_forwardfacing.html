@@ -299,10 +299,35 @@
   function init() {
     const params = new URL(window.location.href).searchParams;
     const objname = params.get("obj");
+    const meshtype = params.get("mesh");
+    const textype = params.get("tex");
+    const mlptype = params.get("mlp");
 
     let obj_name = "horns";
     if (objname) {
       obj_name = objname;
+    }
+
+    let mesh_type = "obj"
+    if (meshtype) {
+      mesh_type = meshtype
+    }
+
+    let tex_type = "png"
+    if (textype) {
+      tex_type = textype
+    }
+
+    let mlp_type = "raw"
+    if (mlptype) {
+      mlp_type = mlptype
+    }
+    
+    if (mlp_type == 'raw') {
+      var JSONFile = obj_name + "_phone/mlp.json";
+    }
+    else{
+      var JSONFile = obj_name + "_phone/mlp_prune.json";
     }
 
     if (WebGL.isWebGL2Available() === false) {
@@ -349,23 +374,32 @@
 
     scene = new THREE.Scene();
 
-    fetch(obj_name + "_phone/mlp.json")
+    fetch(JSONFile)
       .then((response) => {
         return response.json();
       })
       .then((json) => {
         for (let i = 0, il = json["obj_num"]; i < il; i++) {
+          if (tex_type == 'png'){
+            var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.png";
+            var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.png";
+          }
+          else{
+            var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.4.png";
+            var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.4.png";
+          }
           let tex0 = new THREE.TextureLoader().load(
-            obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.png",
-            function () {
+            feat0name,
+            function (texture) {
+              // document.getElementById("auxdisplay").innerHTML = JSON.stringify(tex0, null, 4);
               render();
             }
           );
           tex0.magFilter = THREE.NearestFilter;
           tex0.minFilter = THREE.NearestFilter;
           let tex1 = new THREE.TextureLoader().load(
-            obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.png",
-            function () {
+            feat1name,
+            function (texture) {
               render();
             }
           );
@@ -385,21 +419,53 @@
             },
             glslVersion: THREE.GLSL3,
           });
-          new OBJLoader().load(
-            obj_name + "_phone/shape" + i.toFixed(0) + ".obj",
-            function (object) {
-              object.traverse(function (child) {
-                if (child.type == "Mesh") {
-                  child.material = newmat;
-                }
-              });
-              object.scale.x = object_rescale;
-              object.scale.y = object_rescale;
-              object.scale.z = object_rescale;
-              object.position.z = 1 * object_rescale;
-              scene.add(object);
-            }
-          );
+           
+          if (mesh_type == "drc")
+          {
+            // Instantiate a loader
+            const loader = new DRACOLoader();
+
+            // Specify path to a folder containing WASM/JS decoding libraries.
+            loader.setDecoderPath( 'https://www.gstatic.com/draco/versioned/decoders/1.5.6/' );
+
+            // Optional: Pre-fetch Draco WASM/JS module.
+            loader.preload();
+
+            // Load a Draco geometry
+            loader.load(
+              obj_name + "_phone/shape" + i.toFixed(0) + ".drc",
+              // called when the resource is loaded
+              function ( geometry ) {
+                var material = new THREE.MeshStandardMaterial( { vertexColors: THREE.VertexColors } );
+                var object = new THREE.Mesh( geometry, material );
+                // document.getElementById("auxdisplay").innerHTML = 'Add latency here.';
+                object.traverse(function (child) {
+                  if (child.type == "Mesh") {
+                    child.material = newmat;
+                  }
+                });
+                object.scale.x = object_rescale;
+                object.scale.y = object_rescale;
+                object.scale.z = object_rescale;
+                scene.add(object);
+              }
+            );}
+          else {
+            new OBJLoader().load(
+              obj_name + "_phone/shape" + i.toFixed(0) + ".obj",
+              function (object) {
+                object.traverse(function (child) {
+                  if (child.type == "Mesh") {
+                    child.material = newmat;
+                  }
+                });
+                object.scale.x = object_rescale;
+                object.scale.y = object_rescale;
+                object.scale.z = object_rescale;
+                object.position.z = 1 * object_rescale;
+                scene.add(object);
+              }
+            );}
         }
 
         let network_weights = json;

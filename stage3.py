@@ -42,6 +42,10 @@ print(jax.local_devices())
 #   print("ERROR: need 8 v100 GPUs")
 #   1/0
 
+
+obj_save_dir = "obj"
+if not os.path.exists(obj_save_dir):
+  os.makedirs(obj_save_dir)
 weights_dir = prefix + "weights"
 samples_dir = prefix + "samples"
 if not os.path.exists(weights_dir):
@@ -78,14 +82,14 @@ if scene_type=="synthetic":
     paths = []
     for i in range(len(meta["frames"])):
       frame = meta["frames"][i]
-      cams.append(np.array(frame["transform_matrix"], dtype=np.float32))
+      cams.append(np.array(frame["transform_matrix"], dtype=data_type))
 
       fname = os.path.join(data_dir, frame["file_path"] + ".png")
       paths.append(fname)
 
     def image_read_fn(fname):
       with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        image = np.array(Image.open(imgin), dtype=data_type) / 255.
       return image
     with ThreadPool() as pool:
       images = pool.map(image_read_fn, paths)
@@ -102,7 +106,7 @@ if scene_type=="synthetic":
     camera_angle_x = float(meta["camera_angle_x"])
     focal = .5 * w / np.tan(.5 * camera_angle_x)
 
-    hwf = np.array([h, w, focal], dtype=np.float32)
+    hwf = np.array([h, w, focal], dtype=data_type)
     poses = np.stack(cams, axis=0)
     return {'images' : images, 'c2w' : poses, 'hwf' : hwf}
 
@@ -215,7 +219,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     ]
     def image_read_fn(fname):
       with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        image = np.array(Image.open(imgin), dtype=data_type) / 255.
       return image
     with ThreadPool() as pool:
       images = pool.map(image_read_fn, imgfiles)
@@ -240,9 +244,9 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     # Correct rotation matrix ordering and move variable dim to axis 0.
     poses = np.concatenate(
         [poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
-    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    poses = np.moveaxis(poses, -1, 0).astype(data_type)
     images = np.moveaxis(images, -1, 0)
-    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+    bds = np.moveaxis(bds, -1, 0).astype(data_type)
 
 
     if scene_type=="real360":
@@ -271,7 +275,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     focal = poses[0, -1, -1]
     h, w = images.shape[1:3]
 
-    hwf = np.array([h, w, focal], dtype=np.float32)
+    hwf = np.array([h, w, focal], dtype=data_type)
 
     return {'images' : jnp.array(images), 'c2w' : jnp.array(camtoworlds), 'hwf' : jnp.array(hwf)}
 
@@ -394,9 +398,9 @@ def random_ray_batch(rng, batch_size, data): ### antialiasing by supersampling
   keys = random.split(rng, 3)
   cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
   y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
-  y_ind_f = y_ind.astype(np.float32)
+  y_ind_f = y_ind.astype(data_type)
   x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
-  x_ind_f = x_ind.astype(np.float32)
+  x_ind_f = x_ind.astype(data_type)
   pixel_coords = np.stack([x_ind_f-0.25, y_ind_f-0.25, x_ind_f+0.25, y_ind_f-0.25,
                   x_ind_f-0.25, y_ind_f+0.25, x_ind_f+0.25, y_ind_f+0.25], axis=-1)
   pixel_coords = np.reshape(pixel_coords, [batch_size,4,2])
@@ -499,15 +503,15 @@ elif scene_type=="real360":
 
 
 
-grid_dtype = np.float32
+data_type = data_type
 
 #plane parameter grid
 point_grid = np.zeros(
       (point_grid_size, point_grid_size, point_grid_size, 3),
-      dtype=grid_dtype)
+      dtype=data_type)
 acc_grid = np.zeros(
       (point_grid_size, point_grid_size, point_grid_size),
-      dtype=grid_dtype)
+      dtype=data_type)
 point_grid_diff_lr_scale = 16.0/point_grid_size
 
 
@@ -578,14 +582,6 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([channel_width,channel_width,3])
 
-if VQ:
-  # containing all available features
-  codebook = np.zeros((quant_levels, num_bottleneck_features),dtype=grid_dtype)
-  # initialize randomly
-  codebook = random.normal(random.PRNGKey(0),(quant_levels, num_bottleneck_features),dtype=grid_dtype)
-  # output a soft index
-  feature_model = RadianceField(quant_levels)
-
 # These are the variables we will be optimizing during trianing.
 model_vars = [point_grid, acc_grid,
               density_model.init(
@@ -598,8 +594,6 @@ model_vars = [point_grid, acc_grid,
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3+num_bottleneck_features])),
               ]
-if VQ:
-  model_vars.append(codebook)
 
 #avoid bugs
 point_grid = None
@@ -688,21 +682,7 @@ def get_density_color(pts, vars):
 
   #previous: (features+dirs)->MLP->(RGB)
   mlp_indices = None
-  if VQ:
-    # it should provide a different way to calculate features using index
-    y_soft = jax.nn.softmax(feature_model.apply(vars[3], pts), axis=-1)
-    N,M,P,C = y_soft.shape
-    y_soft = y_soft.reshape(-1,C)
-    # need to save index and keys, the index should be visualized
-    index = y_soft.argmax(axis=-1)
-    y_hard = np.zeros_like(y_soft).at[[i for i in range(len(index))],index].set(1.0)
-    keys = y_hard - jax.lax.stop_gradient(y_soft) + y_soft
-    keys = keys.reshape(N,M,P,C)
-    mlp_indices = index.reshape(N,M,P,C)
-    # the feature here should be more accurate
-    mlp_features = jax.nn.sigmoid(np.matmul(keys, vars[5]))
-  else:
-    mlp_features = jax.nn.sigmoid(feature_model.apply(vars[3], pts))
+  mlp_features = jax.nn.sigmoid(feature_model.apply(vars[3], pts))
   #discretize
   mlp_features_ = np.round(mlp_features*255).astype(np.uint8)
   mlp_features_0 = np.clip(mlp_features_[...,0:1],1,255)*mlp_alpha[..., None]
@@ -762,8 +742,6 @@ p0123 = None
 total_len = len(positions_z)
 batch_len = total_len//batch_num
 coarse_feature_z = numpy.zeros([total_len,num_bottleneck_features],numpy.uint8)
-if VQ:
-  index_map_z = numpy.zeros([total_len,1],numpy.uint8)
 for i in range(batch_num):
   # positions to query
   t0 = numpy.reshape(positions_z[i*batch_len:(i+1)*batch_len], [n_device,-1,3])
@@ -772,21 +750,13 @@ for i in range(batch_num):
   t0, t1 = get_density_color_p(t0,vars)
   # feature dim: batch_size * 8
   coarse_feature_z[i*batch_len:(i+1)*batch_len] = numpy.reshape(t0,[-1,num_bottleneck_features])
-  if VQ:
-    index_map_z[i*batch_len:(i+1)*batch_len] = numpy.reshape(t1,[-1,1])
 coarse_feature_z = numpy.reshape(coarse_feature_z,[layer_num,texture_size,texture_size,num_bottleneck_features])
 coarse_feature_z[:,-quad_size:,:] = 0
 coarse_feature_z[:,:,-quad_size:] = 0
-if VQ:
-  index_map_z = numpy.reshape(index_map_z, [layer_num,texture_size,texture_size,1])
-  index_map_z[:,-quad_size:,:] = 0
-  index_map_z[:,:,-quad_size:] = 0
 
 positions_z = None
 
 buffer_z = []
-if VQ:
-  layer_index_z = []
 for i in range(layer_num):
   if not numpy.any(coarse_feature_z[i,:,:,0]>0):
     buffer_z.append(None)
@@ -794,12 +764,8 @@ for i in range(layer_num):
   # split feature in last dimension 8 -> 4 + 4, PNG supports 1 (gray scale), 3 (RGB), and 4 (RGBA)
   feats = get_feature_png(coarse_feature_z[i])
   buffer_z.append(feats)
-  if VQ:
-    layer_index_z.append(index_map_z[i])
 
 coarse_feature_z = None
-if VQ:
-  index_map_z = None
 
 
 ##### x planes
@@ -828,39 +794,25 @@ p0123 = None
 total_len = len(positions_x)
 batch_len = total_len//batch_num
 coarse_feature_x = numpy.zeros([total_len,num_bottleneck_features],numpy.uint8)
-if VQ:
-  index_map_x = numpy.zeros([total_len,1],numpy.uint8)
 for i in range(batch_num):
   t0 = numpy.reshape(positions_x[i*batch_len:(i+1)*batch_len], [n_device,-1,3])
   t0, t1 = get_density_color_p(t0,vars)
   coarse_feature_x[i*batch_len:(i+1)*batch_len] = numpy.reshape(t0,[-1,num_bottleneck_features])
-  if VQ:
-    index_map_x[i*batch_len:(i+1)*batch_len] = numpy.reshape(t1,[-1,1])
 coarse_feature_x = numpy.reshape(coarse_feature_x,[layer_num,texture_size,texture_size,num_bottleneck_features])
 coarse_feature_x[:,-quad_size:,:] = 0
 coarse_feature_x[:,:,-quad_size:] = 0
-if VQ:
-  index_map_x = numpy.reshape(index_map_x, [layer_num,texture_size,texture_size,1])
-  index_map_x[:,-quad_size:,:] = 0
-  index_map_x[:,:,-quad_size:] = 0
 
 positions_x = None
 
 buffer_x = []
-if VQ:
-  layer_index_x = []
 for i in range(layer_num):
   if not numpy.any(coarse_feature_x[i,:,:,0]>0):
     buffer_x.append(None)
     continue
   feats = get_feature_png(coarse_feature_x[i])
   buffer_x.append(feats)
-  if VQ:
-    layer_index_x.append(index_map_x[i])
 
 coarse_feature_x = None
-if VQ:
-  index_map_x = None
 
 
 
@@ -890,47 +842,31 @@ p0123 = None
 total_len = len(positions_y)
 batch_len = total_len//batch_num
 coarse_feature_y = numpy.zeros([total_len,num_bottleneck_features],numpy.uint8)
-if VQ:
-  index_map_y = numpy.zeros([total_len,1],numpy.uint8)
 for i in range(batch_num):
   t0 = numpy.reshape(positions_y[i*batch_len:(i+1)*batch_len], [n_device,-1,3])
   t0, t1 = get_density_color_p(t0,vars)
   coarse_feature_y[i*batch_len:(i+1)*batch_len] = numpy.reshape(t0,[-1,num_bottleneck_features])
-  if VQ:
-    index_map_y[i*batch_len:(i+1)*batch_len] = numpy.reshape(t1,[-1,1])
 coarse_feature_y = numpy.reshape(coarse_feature_y,[layer_num,texture_size,texture_size,num_bottleneck_features])
 coarse_feature_y[:,-quad_size:,:] = 0
 coarse_feature_y[:,:,-quad_size:] = 0
-if VQ:
-  index_map_y = numpy.reshape(index_map_y, [layer_num,texture_size,texture_size,1])
-  index_map_y[:,-quad_size:,:] = 0
-  index_map_y[:,:,-quad_size:] = 0
 
 positions_y = None
 
 buffer_y = []
-if VQ:
-  layer_index_y = []
 for i in range(layer_num):
   if not numpy.any(coarse_feature_y[i,:,:,0]>0):
     buffer_y.append(None)
     continue
   feats = get_feature_png(coarse_feature_y[i])
   buffer_y.append(feats)
-  if VQ:
-    layer_index_y.append(index_map_y[i])
 
 coarse_feature_y = None
-if VQ:
-  index_map_y = None
 
 #%%
 write_floatpoint_image(samples_dir+"/s3_slice_sample.png",buffer_z[layer_num//2][0]/255.0)
 #%%
 out_img_size = 1024*20
 out_img = []
-if VQ:
-  out_index = [numpy.zeros([out_img_size,out_img_size,1], numpy.uint8)]
 for i in range(out_feat_num):
   out_img.append(numpy.zeros([out_img_size,out_img_size,out_feat_chan], numpy.uint8))
     
@@ -1010,8 +946,6 @@ if scene_type=="synthetic" or scene_type=="real360":
           if feats is not None and numpy.max(feats[0][i*quad_size:(i+1)*quad_size+1,j*quad_size:(j+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,i,j,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_z[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -1038,8 +972,6 @@ if scene_type=="synthetic" or scene_type=="real360":
           if feats is not None and numpy.max(feats[0][j*quad_size:(j+1)*quad_size+1,k*quad_size:(k+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,j,k,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_x[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -1066,8 +998,6 @@ if scene_type=="synthetic" or scene_type=="real360":
           if feats is not None and numpy.max(feats[0][i*quad_size:(i+1)*quad_size+1,k*quad_size:(k+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,i,k,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_y[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -1106,8 +1036,6 @@ elif scene_type=="forwardfacing":
           if feats is not None and numpy.max(feats[0][i*quad_size:(i+1)*quad_size+1,j*quad_size:(j+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,i,j,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_z[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -1134,8 +1062,6 @@ elif scene_type=="forwardfacing":
           if feats is not None and numpy.max(feats[0][j*quad_size:(j+1)*quad_size+1,k*quad_size:(k+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,j,k,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_x[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -1162,8 +1088,6 @@ elif scene_type=="forwardfacing":
           if feats is not None and numpy.max(feats[0][i*quad_size:(i+1)*quad_size+1,k*quad_size:(k+1)*quad_size+1,2])>0:
 
             write_patch_to_png(out_img,out_cell_num,out_img_w,i,k,feats)
-            if VQ:
-              write_patch_to_png(out_index,out_cell_num,out_img_w,i,j,layer_index_y[k],layers=1)
             uv0,uv1,uv2,uv3 = get_png_uv(out_cell_num,out_img_w,out_img_size)
             out_cell_num += 1
 
@@ -2060,7 +1984,7 @@ def render_rays_get_uv(rays, vars, uv, alp):
 
   world_alpha, world_uv = compute_undc_intersection_and_return_uv(
                         vars[0], uv, alp, grid_indices, grid_masks, rays)
-  world_alpha = world_alpha.astype(np.float32)
+  world_alpha = world_alpha.astype(data_type)
 
   # Now use the MLP to compute density and features
   mlp_alpha_b = world_alpha[..., 0] #[N,4,P]
@@ -2073,19 +1997,23 @@ def render_rays_get_uv(rays, vars, uv, alp):
 
   return acc_b, selected_uv
 
-def render_rays_get_color(rays, vars, mlp_features_b, acc_b):
+def render_rays_get_color(rays, vars, mlp_features_b, acc_b, prune_chan):
 
-  mlp_features_b = mlp_features_b.astype(np.float32)/255 #[N,4,C]
+  mlp_features_b = mlp_features_b.astype(data_type)/255 #[N,4,C]
   mlp_features_b = mlp_features_b  * acc_b[..., None] #[N,4,C]
   mlp_features_b = np.mean(mlp_features_b, axis=-2) #[N,C]
 
-  acc_b = np.mean(acc_b.astype(np.float32), axis=-1) #[N]
+  acc_b = np.mean(acc_b.astype(data_type), axis=-1) #[N]
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1]) #[N,4,3]
   dirs = np.mean(dirs, axis=-2) #[N,3]
   features_dirs_enc_b = np.concatenate([mlp_features_b, dirs], axis=-1) #[N,C+3]
-  rgb_b = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc_b))
+  if onn:
+    tmp_mlp = apply_prune(vars[4],prune_chan=prune_chan)
+    rgb_b = jax.nn.sigmoid(color_model.apply(tmp_mlp, features_dirs_enc_b))
+  else:
+    rgb_b = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc_b))
 
   # Composite onto the background color.
   if white_bkgd:
@@ -2114,36 +2042,36 @@ test_batch_size = 4096*n_device
 
 render_rays_get_uv_p = jax.pmap(lambda rays, vars, uv, alp: render_rays_get_uv(
     rays, vars, uv, alp),
-    in_axes=(0, None, None, None))
+    in_axes=(0, None, None, None, None))
 
-render_rays_get_color_p = jax.pmap(lambda rays, vars, mlp_features_b, acc_b: render_rays_get_color(
-    rays, vars, mlp_features_b, acc_b),
-    in_axes=(0, None, 0, 0))
+render_rays_get_color_p = jax.pmap(lambda rays, vars, mlp_features_b, acc_b, prune_chan: render_rays_get_color(
+    rays, vars, mlp_features_b, acc_b, prune_chan),
+    in_axes=(0, None, 0, 0, None))
 
 
-def render_test(rays, vars, uv, alp, feat):
+def render_test(rays, vars, uv, alp, feat, prune_chan):
   sh = rays[0].shape
   rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
-  acc_b, selected_uv = render_rays_get_uv_p(rays, vars, uv, alp)
+  acc_b, selected_uv = render_rays_get_uv_p(rays, vars, uv, alp, prune_chan)
 
   #deferred features
   selected_uv = numpy.array(selected_uv)
   mlp_features_b = feat[selected_uv[...,0],selected_uv[...,1]]
 
-  rgb_b, acc_b = render_rays_get_color_p(rays, vars, mlp_features_b, acc_b)
+  rgb_b, acc_b = render_rays_get_color_p(rays, vars, mlp_features_b, acc_b, prune_chan)
 
   out = [rgb_b, acc_b, selected_uv]
   out = [numpy.reshape(numpy.array(out[i]),sh[:-2]+(-1,)) for i in range(3)]
   return out
 
-def render_loop(rays, vars, uv, alp, feat, chunk):
+def render_loop(rays, vars, uv, alp, feat, chunk, prune_chan=0):
   sh = list(rays[0].shape[:-2])
   rays = [x.reshape([-1, 4, 3]) for x in rays]
   l = rays[0].shape[0]
   n = jax.local_device_count()
   p = ((l - 1) // n + 1) * n - l
   rays = [np.pad(x, ((0,p),(0,0),(0,0))) for x in rays]
-  outs = [render_test([x[i:i+chunk] for x in rays], vars, uv, alp, feat)
+  outs = [render_test([x[i:i+chunk] for x in rays], vars, uv, alp, feat, prune_chan)
           for i in range(0, rays[0].shape[0], chunk)]
   outs = [np.reshape(
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(3)]
@@ -2163,15 +2091,16 @@ elif scene_type=="real360":
   selected_test_index = 0
   preview_image_height = 840//2
 
-rays = camera_ray_batch(
-    data['test']['c2w'][selected_test_index], data['test']['hwf'])
-gt = data['test']['images'][selected_test_index]
-out = render_loop(rays, model_vars, point_UV_grid, texture_alpha, texture_features, test_batch_size)
-rgb = out[0]
-acc = out[1]
-write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_rgb_discretized.png",rgb)
-write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_gt.png",gt)
-write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_acc_discretized.png",acc)
+if zero_test:
+  rays = camera_ray_batch(
+      data['test']['c2w'][selected_test_index], data['test']['hwf'])
+  gt = data['test']['images'][selected_test_index]
+  out = render_loop(rays, model_vars, point_UV_grid, texture_alpha, texture_features, test_batch_size)
+  rgb = out[0]
+  acc = out[1]
+  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_rgb_discretized.png",rgb)
+  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_gt.png",gt)
+  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_acc_discretized.png",acc)
 #%% --------------------------------------------------------------------------------
 # ## Remove invisible triangles
 #%%
@@ -2289,97 +2218,32 @@ print("Number of quad faces:", num_visible_quads)
 #%%
 gc.collect()
 
+
 render_poses = data['test']['c2w'][:len(data['test']['images'])]
 frames = []
 framemasks = []
-print("Testing")
-for p in tqdm(render_poses):
-  out = render_loop(camera_ray_batch(p, hwf), vars, point_UV_grid, texture_alpha, texture_features, test_batch_size)
-  frames.append(out[0])
-  framemasks.append(out[1])
-psnrs_test = [-10 * np.log10(np.mean(np.square(rgb - gt))) for (rgb, gt) in zip(frames, data['test']['images'])]
-print("Test set average PSNR: %f" % np.array(psnrs_test).mean())
+for pruned in pruned_to_eval:
+  test_iter = tqdm(render_poses)
+  psnr_module = AverageMeter()
+  ssim_module = AverageMeter()
+  for i, p in enumerate(test_iter):
+    out = render_loop(camera_ray_batch(p, hwf), vars, point_UV_grid, texture_alpha, texture_features, test_batch_size, prune_chan=pruned)
+    frames.append(out[0])
+    framemasks.append(out[1])
 
-#%%
-import jax.numpy as jnp
-import jax.scipy as jsp
+    # PSNR
+    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+    psnr_module.update(float(psnr))
+    
+    # SSIM
+    ssim = ssim_fn(out[0], data['test']['images'][i])
+    ssim_module.update(float(ssim))
 
-def compute_ssim(img0,
-                 img1,
-                 max_val,
-                 filter_size=11,
-                 filter_sigma=1.5,
-                 k1=0.01,
-                 k2=0.03,
-                 return_map=False):
-  """Computes SSIM from two images.
-  This function was modeled after tf.image.ssim, and should produce comparable
-  output.
-  Args:
-    img0: array. An image of size [..., width, height, num_channels].
-    img1: array. An image of size [..., width, height, num_channels].
-    max_val: float > 0. The maximum magnitude that `img0` or `img1` can have.
-    filter_size: int >= 1. Window size.
-    filter_sigma: float > 0. The bandwidth of the Gaussian used for filtering.
-    k1: float > 0. One of the SSIM dampening parameters.
-    k2: float > 0. One of the SSIM dampening parameters.
-    return_map: Bool. If True, will cause the per-pixel SSIM "map" to returned
-  Returns:
-    Each image's mean SSIM, or a tensor of individual values if `return_map`.
-  """
-  # Construct a 1D Gaussian blur filter.
-  hw = filter_size // 2
-  shift = (2 * hw - filter_size + 1) / 2
-  f_i = ((jnp.arange(filter_size) - hw + shift) / filter_sigma)**2
-  filt = jnp.exp(-0.5 * f_i)
-  filt /= jnp.sum(filt)
-
-  # Blur in x and y (faster than the 2D convolution).
-  filt_fn1 = lambda z: jsp.signal.convolve2d(z, filt[:, None], mode="valid")
-  filt_fn2 = lambda z: jsp.signal.convolve2d(z, filt[None, :], mode="valid")
-
-  # Vmap the blurs to the tensor size, and then compose them.
-  num_dims = len(img0.shape)
-  map_axes = tuple(list(range(num_dims - 3)) + [num_dims - 1])
-  for d in map_axes:
-    filt_fn1 = jax.vmap(filt_fn1, in_axes=d, out_axes=d)
-    filt_fn2 = jax.vmap(filt_fn2, in_axes=d, out_axes=d)
-  filt_fn = lambda z: filt_fn1(filt_fn2(z))
-
-  mu0 = filt_fn(img0)
-  mu1 = filt_fn(img1)
-  mu00 = mu0 * mu0
-  mu11 = mu1 * mu1
-  mu01 = mu0 * mu1
-  sigma00 = filt_fn(img0**2) - mu00
-  sigma11 = filt_fn(img1**2) - mu11
-  sigma01 = filt_fn(img0 * img1) - mu01
-
-  # Clip the variances and covariances to valid values.
-  # Variance must be non-negative:
-  sigma00 = jnp.maximum(0., sigma00)
-  sigma11 = jnp.maximum(0., sigma11)
-  sigma01 = jnp.sign(sigma01) * jnp.minimum(
-      jnp.sqrt(sigma00 * sigma11), jnp.abs(sigma01))
-
-  c1 = (k1 * max_val)**2
-  c2 = (k2 * max_val)**2
-  numer = (2 * mu01 + c1) * (2 * sigma01 + c2)
-  denom = (mu00 + mu11 + c1) * (sigma00 + sigma11 + c2)
-  ssim_map = numer / denom
-  ssim = jnp.mean(ssim_map, list(range(num_dims - 3, num_dims)))
-  return ssim_map if return_map else ssim
-
-# Compiling to the CPU because it's faster and more accurate.
-ssim_fn = jax.jit(
-    functools.partial(compute_ssim, max_val=1.), backend="cpu")
-
-ssim_values = []
-for i in range(len(data['test']['images'])):
-  ssim = ssim_fn(frames[i], data['test']['images'][i])
-  ssim_values.append(float(ssim))
-
-print("Test set average SSIM: %f" % np.array(ssim_values).mean())
+    # display
+    test_iter.set_description(
+      f"Test I:{i}. Prune:{pruned}. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
 #%% --------------------------------------------------------------------------------
 # ## Write mesh
 #%%
@@ -2416,8 +2280,6 @@ else:
 
 
 new_img = []
-if VQ:
-  png_index = [numpy.zeros([new_img_size_h,new_img_size_w,1], numpy.uint8)]
 for i in range(out_feat_num):
   new_img.append(numpy.zeros([new_img_size_h,new_img_size_w,out_feat_chan], numpy.uint8))
 new_cell_num = 0
@@ -2448,10 +2310,6 @@ def copy_patch_to_png(out_img,out_cell_num,new_img,new_cell_num, layers=out_feat
 
 #write mesh
 
-obj_save_dir = "obj"
-if not os.path.exists(obj_save_dir):
-  os.makedirs(obj_save_dir)
-
 obj_f = open(obj_save_dir+"/shape.obj",'w')
 
 vcount = 0
@@ -2460,8 +2318,6 @@ for i in range(out_cell_num):
   quad_visible, t1_visible, t2_visible = check_triangle_visible(texture_mask, i)
   if quad_visible:
     copy_patch_to_png(out_img,i,new_img,new_cell_num)
-    if VQ:
-      copy_patch_to_png(out_index,i,png_index,new_cell_num)
     p0,p1,p2,p3 = bag_of_v[i]
     uv0,uv1,uv2,uv3 = get_png_uv(new_cell_num,new_img_w,new_img_size_w)
     new_cell_num += 1
@@ -2489,7 +2345,6 @@ for i in range(out_cell_num):
 
 for j in range(out_feat_num):
   cv2.imwrite(obj_save_dir+"/shape.pngfeat"+str(j)+".png", new_img[j], [cv2.IMWRITE_PNG_COMPRESSION, 9]) # 9: most compression, time consuming
-cv2.imwrite(obj_save_dir+"/shape.index.png", png_index[0], [cv2.IMWRITE_PNG_COMPRESSION, 9]) # 9: most compression, time consuming
 obj_f.close()
 
 
@@ -2503,12 +2358,11 @@ mlp_params['2_weights'] = vars[4]['params']['Dense_2']['kernel'].tolist()
 mlp_params['0_bias'] = vars[4]['params']['Dense_0']['bias'].tolist()
 mlp_params['1_bias'] = vars[4]['params']['Dense_1']['bias'].tolist()
 mlp_params['2_bias'] = vars[4]['params']['Dense_2']['bias'].tolist()
-if VQ:
-  mlp_params['codebook'] = vars[5].tolist()
 
 scene_params_path = obj_save_dir+'/mlp.json'
 with open(scene_params_path, 'wb') as f:
   f.write(json.dumps(mlp_params).encode('utf-8'))
+  
 #%% --------------------------------------------------------------------------------
 # ## Split the large texture image into images of size 4096
 #%%
@@ -2671,8 +2525,8 @@ fout.close()
 # # Save images for testing
 #%%
 
-pred_frames = np.array(frames,np.float32)
-gt_frames = np.array(data['test']['images'],np.float32)
+pred_frames = np.array(frames,data_type)
+gt_frames = np.array(data['test']['images'],data_type)
 
 pickle.dump(pred_frames, open(weights_dir+"/"+"/pred_frames.pkl", "wb"))
 pickle.dump(gt_frames, open(weights_dir+"/"+"gt_frames.pkl", "wb"))
