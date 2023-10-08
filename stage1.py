@@ -1515,10 +1515,10 @@ train_iter = tqdm(range(step_init, final_training_iters + 1))
 for i in train_iter:
   t = time.time()
 
-  if i <= training_iters:
+  if not onn:
     lr = lr_fn(i,train_iters_cont, 1e-3, 1e-5)
   else:
-    lr = lr_fn(training_iters,train_iters_cont, 1e-3, 1e-5)
+    lr = lr_fn(i,final_training_iters, 1e-3, 1e-5)
   wbgcolor = min(1.0, float(i)/50000)
   wbinary = 0.0
 
@@ -1567,7 +1567,7 @@ for i in train_iter:
 
   # show result
   train_iter.set_description(
-      f"I:{i}. Stage:{train_phase}. "
+      f"{prefix} I:{i}. Stage:{train_phase}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
 
   if i > 0:
@@ -1580,15 +1580,15 @@ for i in train_iter:
     vars = flax.jax_utils.unreplicate(model_vars)
     pickle.dump(vars, open(weights_dir+"/s1_"+"tmp_state"+str(i)+".pkl", "wb"))
 
-    print('Current iteration %d, elapsed training time: %d min %d sec.'
-          % (i, t_total // 60, int(t_total) % 60), end='\r')
+    print('Elapsed training time: %d min %d sec.'
+          % (t_total // 60, int(t_total) % 60), end=',')
 
-    print(' Batch size: %d' % batch_size, 'Keep num: %d' % keep_num, end='\r')
+    print(' Batch size: %d' % batch_size, 'Keep num: %d' % keep_num, end=',')
     t_elapsed = t_total - t_last
     i_elapsed = i - i_last
     t_last = t_total
     i_last = i
-    print(" Speed:",'  %0.3f secs per iter.' % (t_elapsed / i_elapsed),'  %0.3f iters per sec.' % (i_elapsed / t_elapsed), end='\r')
+    print(" Speed:",'  %0.3f secs per iter.' % (t_elapsed / i_elapsed),'  %0.3f iters per sec.' % (i_elapsed / t_elapsed), end=',')
 
     vars = flax.jax_utils.unreplicate(model_vars)
     # change the model architecture here: bit width, channel width
@@ -1597,7 +1597,7 @@ for i in train_iter:
     gt = data['test']['images'][selected_test_index]
     
     prune_chan = phase2pruned_channel(train_phase)
-    print(" Test pruned channel:",prune_chan, end='\r')
+    print(" Test pruned:",prune_chan, end=',')
 
     out = render_loop(rays, vars, test_batch_size, prune_chan)
     rgb = out[0]
@@ -1607,7 +1607,7 @@ for i in train_iter:
     psnrs_test.append(-10 * np.log10(np.mean(np.square(rgb - gt))))
     iters_test.append(i)
 
-    print(" PSNR:",'  Training running average: %0.3f' % np.mean(np.array(psnrs[-200:])),'  Selected test image: %0.3f' % psnrs_test[-1])
+    print(" PSNR:",'  Training: %0.3f' % np.mean(np.array(psnrs[-200:])),'  Selected: %0.3f' % psnrs_test[-1])
 
     plt.figure()
     plt.title(i)
@@ -1654,7 +1654,7 @@ for pruned in pruned_to_eval:
 
     # display
     test_iter.set_description(
-      f"Test I:{i}. Prune:{prune_chan}. "
+      f"Test I:{i}. Prune:{pruned}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
     

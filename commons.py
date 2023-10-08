@@ -7,6 +7,7 @@ import functools
 from jax.experimental.host_callback import call
 import copy
 
+
 # test at epoch 0
 zero_test = False
 
@@ -19,37 +20,40 @@ num_bottleneck_features = 8
 data_type, floatnum = np.float32, 32
 
 # whether train multiple mlp
-onn = True
+onn = False
 
 # single test during training
 pruned_to_test = 0
 
-# channel_width = 16
-# 16,32,48,64,80,96
-total_steps = 600000
-# total_phases = 6
-total_phases = 48
-step_per_phase = total_steps//total_phases
-channel_width = 96
-pruned_to_eval = [0,32,80,88,92,94]
-def phase2pruned_channel(phase):
-  return (channel_width//total_phases) * phase
-
 if not onn:
-   pruned_to_eval = [0]
+  pruned_to_eval = [0]
+  channel_width = 16
+  total_phases = 0
+  step_per_phase = 200000
+  def phase2pruned_channel(phase):
+     return 0
+else:
+  channel_width,total_phases,pruned_to_eval = 96,24,[80]
+  total_steps = 800000
+  step_per_phase = total_steps//total_phases
+  def phase2pruned_channel(phase):
+    return (channel_width//total_phases) * phase
 
 
-prefix = f'C{channel_width}_P{total_phases}_'
 
-scene_type = "synthetic"
-object_name = "chair"
-scene_dir = "../dataset/nerf_synthetic/"+object_name
+scene_type = "forwardfacing"
+object_name = "fortress"
+scene_dir = "../dataset/nerf_llff_data/"+object_name
+prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
 # synthetic
+# nerf_synthetic
 # chair drums ficus hotdog lego materials mic ship
 
 # forwardfacing
+# nerf_llff_data
 # fern flower fortress horns leaves orchids room trex
+# flower has some problems
 
 # real360
 # bicycle flowerbed gardenvase stump treehill
@@ -92,7 +96,8 @@ def apply_prune(mlp, prune_chan = 0, prunable_num = 2):
       broadcasted_imp = np.broadcast_to(channel_imp[i][:,np.newaxis], mlp['params'][f'Dense_{i+1}']['kernel'].shape)
       tmp_mlp['params'][f'Dense_{i+1}']['kernel'] *= np.where(broadcasted_imp < threshold, 0.0, 1.0)
       tmp_mlp['params'][f'Dense_{i}']['bias'] *= np.where(channel_imp[i] < threshold, 0.0, 1.0)
-      # call(lambda x: print(f"----1------{x}-------"), np.where(channel_imp[i] < threshold, 0.0, 1.0))
+      # call(lambda x: print(f"------{x}-------"), threshold)
+      # call(lambda x: print(f"------{x}-------"), np.where(channel_imp[i] < threshold, 0.0, 1.0))
 
   return tmp_mlp
 

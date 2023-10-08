@@ -1350,6 +1350,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): #
 
   #deferred features
   mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[3], pts)) #[N,4,P,C]
+  
   mlp_features = np.sum(weights[..., None] * mlp_features_, axis=-2) #[N,4,C]
   mlp_features = np.mean(mlp_features, axis=-2) #[N,C]
   mlp_features_b = np.sum(weights_b[..., None] * mlp_features_, axis=-2) #[N,4,C]
@@ -1583,7 +1584,7 @@ for i in train_iter:
 
   # show result
   train_iter.set_description(
-      f"I:{i}. "
+      f"{prefix} I:{i}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
 
   if i > 0:
@@ -1594,7 +1595,7 @@ for i in train_iter:
     this_train_psnr = np.mean(np.array(psnrs[-5000:]))
 
     #stop when iteration>200000 and the training psnr drops
-    if i>200000 and this_train_psnr<=train_psnr_max-0.001:
+    if not onn and i>200000 and this_train_psnr<=train_psnr_max-0.001:
       vars = pickle.load(open(weights_dir+"/s2_0_"+"tmp_state"+str(i-10000)+".pkl", "rb"))
       break
 
@@ -1616,8 +1617,11 @@ for i in train_iter:
     rays = camera_ray_batch(
         data['test']['c2w'][selected_test_index], data['test']['hwf'])
     gt = data['test']['images'][selected_test_index]
-    pruned = (i//10000)%2 * (total_phases - 1) * (channel_width//total_phases)
-    print(" Pruned:",pruned, end=',')
+    if onn:
+      pruned = 80
+      print(" Pruned:",pruned, end=',')
+    else:
+      pruned = 0
     out = render_loop(rays, vars, test_batch_size, pruned)
     rgb = out[0]
     acc = out[1]
@@ -1652,31 +1656,31 @@ for i in train_iter:
 gc.collect()
 
 
-render_poses = data['test']['c2w'][:len(data['test']['images'])]
-frames = []
-framemasks = []
-for pruned in pruned_to_eval:
-  test_iter = tqdm(render_poses)
-  psnr_module = AverageMeter()
-  ssim_module = AverageMeter()
-  for i, p in enumerate(test_iter):
-    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
-    frames.append(out[2])
-    framemasks.append(out[3])
+# render_poses = data['test']['c2w'][:len(data['test']['images'])]
+# frames = []
+# framemasks = []
+# for pruned in pruned_to_eval:
+#   test_iter = tqdm(render_poses)
+#   psnr_module = AverageMeter()
+#   ssim_module = AverageMeter()
+#   for i, p in enumerate(test_iter):
+#     out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
+#     frames.append(out[2])
+#     framemasks.append(out[3])
 
-    # PSNR
-    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
-    psnr_module.update(float(psnr))
+#     # PSNR
+#     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+#     psnr_module.update(float(psnr))
     
-    # SSIM
-    ssim = ssim_fn(out[0], data['test']['images'][i])
-    ssim_module.update(float(ssim))
+#     # SSIM
+#     ssim = ssim_fn(out[0], data['test']['images'][i])
+#     ssim_module.update(float(ssim))
 
-    # display
-    test_iter.set_description(
-      f"Test I:{i}. Prune:{pruned}. "
-      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
-      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
+#     # display
+#     test_iter.set_description(
+#       f"Test I:{i}. Prune:{pruned}. "
+#       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+#       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
     
 #%%
 #%% --------------------------------------------------------------------------------
@@ -1725,6 +1729,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): #
   #deferred features
   # vector quantization if possible
   mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[3], pts)) #[N,4,P,C]
+
   mlp_features_b = np.sum(weights_b[..., None] * mlp_features_, axis=-2) #[N,4,C]
   mlp_features_b = np.mean(mlp_features_b, axis=-2) #[N,C]
 
@@ -1764,10 +1769,10 @@ render_test_p = jax.pmap(lambda rays, vars, prune_chan: render_rays(
 
 import numpy
 
-def render_test(rays, vars): ### antialiasing by supersampling
+def render_test(rays, vars, prune_chan): ### antialiasing by supersampling
   sh = rays[0].shape
   rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
-  out = render_test_p(rays, vars)
+  out = render_test_p(rays, vars, prune_chan)
   out = [numpy.reshape(numpy.array(out[i]),sh[:-2]+(-1,)) for i in range(2)]
   return out
 
@@ -1906,7 +1911,7 @@ for i in train_iter:
 
   # show result
   train_iter.set_description(
-      f"I:{i}. "
+      f"{prefix} I:{i}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
 
 
@@ -1933,8 +1938,11 @@ for i in train_iter:
     rays = camera_ray_batch(
         data['test']['c2w'][selected_test_index], data['test']['hwf'])
     gt = data['test']['images'][selected_test_index]
-    pruned = (i//10000)%2 * (total_phases - 1) * (channel_width//total_phases)
-    print(" Pruned:",pruned, end=',')
+    if onn:
+      pruned = 80
+      print(" Pruned:",pruned, end=',')
+    else:
+      pruned = 0
     out = render_loop(rays, vars, test_batch_size, pruned)
     rgb_b = out[0]
     acc_b = out[1]

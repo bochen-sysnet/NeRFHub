@@ -36,14 +36,11 @@ import time
 import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
+from jax.experimental.host_callback import call
 
 print(jax.local_devices())
-# if len(jax.local_devices())!=8:
-#   print("ERROR: need 8 v100 GPUs")
-#   1/0
 
-
-obj_save_dir = "obj"
+obj_save_dir = prefix + "obj"
 if not os.path.exists(obj_save_dir):
   os.makedirs(obj_save_dir)
 weights_dir = prefix + "weights"
@@ -743,12 +740,8 @@ total_len = len(positions_z)
 batch_len = total_len//batch_num
 coarse_feature_z = numpy.zeros([total_len,num_bottleneck_features],numpy.uint8)
 for i in range(batch_num):
-  # positions to query
   t0 = numpy.reshape(positions_z[i*batch_len:(i+1)*batch_len], [n_device,-1,3])
-  # get features
-  # we can store two versions of feature maps: one for index, one for feature values
   t0, t1 = get_density_color_p(t0,vars)
-  # feature dim: batch_size * 8
   coarse_feature_z[i*batch_len:(i+1)*batch_len] = numpy.reshape(t0,[-1,num_bottleneck_features])
 coarse_feature_z = numpy.reshape(coarse_feature_z,[layer_num,texture_size,texture_size,num_bottleneck_features])
 coarse_feature_z[:,-quad_size:,:] = 0
@@ -2031,8 +2024,8 @@ def render_rays_get_color(rays, vars, mlp_features_b, acc_b, prune_chan):
 texture_alpha = numpy.zeros([out_img_size,out_img_size,1], numpy.uint8)
 texture_features = numpy.zeros([out_img_size,out_img_size,8], numpy.uint8)
 
+# read from disk for changed png
 texture_alpha[:,:,0] = (out_img[0][:,:,2]>0)
-
 texture_features[:,:,0:3] = out_img[0][:,:,2::-1]
 texture_features[:,:,3] = out_img[0][:,:,3]
 texture_features[:,:,4:7] = out_img[1][:,:,2::-1]
@@ -2042,7 +2035,7 @@ test_batch_size = 4096*n_device
 
 render_rays_get_uv_p = jax.pmap(lambda rays, vars, uv, alp: render_rays_get_uv(
     rays, vars, uv, alp),
-    in_axes=(0, None, None, None, None))
+    in_axes=(0, None, None, None))
 
 render_rays_get_color_p = jax.pmap(lambda rays, vars, mlp_features_b, acc_b, prune_chan: render_rays_get_color(
     rays, vars, mlp_features_b, acc_b, prune_chan),
@@ -2052,7 +2045,7 @@ render_rays_get_color_p = jax.pmap(lambda rays, vars, mlp_features_b, acc_b, pru
 def render_test(rays, vars, uv, alp, feat, prune_chan):
   sh = rays[0].shape
   rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
-  acc_b, selected_uv = render_rays_get_uv_p(rays, vars, uv, alp, prune_chan)
+  acc_b, selected_uv = render_rays_get_uv_p(rays, vars, uv, alp)
 
   #deferred features
   selected_uv = numpy.array(selected_uv)
@@ -2092,15 +2085,16 @@ elif scene_type=="real360":
   preview_image_height = 840//2
 
 if zero_test:
-  rays = camera_ray_batch(
-      data['test']['c2w'][selected_test_index], data['test']['hwf'])
-  gt = data['test']['images'][selected_test_index]
-  out = render_loop(rays, model_vars, point_UV_grid, texture_alpha, texture_features, test_batch_size)
-  rgb = out[0]
-  acc = out[1]
-  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_rgb_discretized.png",rgb)
-  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_gt.png",gt)
-  write_floatpoint_image(samples_dir+"/s3_"+str(0)+"_acc_discretized.png",acc)
+  for pruned in pruned_to_eval:
+    rays = camera_ray_batch(
+        data['test']['c2w'][selected_test_index], data['test']['hwf'])
+    gt = data['test']['images'][selected_test_index]
+    out = render_loop(rays, model_vars, point_UV_grid, texture_alpha, texture_features, test_batch_size, prune_chan=pruned)
+    rgb = out[0]
+    acc = out[1]
+    write_floatpoint_image(samples_dir+"/s3_"+str(0)+f"_rgb_discretized_{pruned}.png",rgb)
+    write_floatpoint_image(samples_dir+"/s3_"+str(0)+f"_gt_{pruned}.png",gt)
+    write_floatpoint_image(samples_dir+"/s3_"+str(0)+f"_acc_discretized_{pruned}.png",acc)
 #%% --------------------------------------------------------------------------------
 # ## Remove invisible triangles
 #%%
@@ -2241,7 +2235,7 @@ for pruned in pruned_to_eval:
 
     # display
     test_iter.set_description(
-      f"Test I:{i}. Prune:{pruned}. "
+      f"{prefix} Test I:{i}. Prune:{pruned}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
 #%% --------------------------------------------------------------------------------

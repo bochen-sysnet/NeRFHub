@@ -1,10 +1,118 @@
 <div id="container" style="position: fixed; top: 0%; left: 0%"></div>
 
-<div id="info" style="position: absolute; left: 0px; font-size: 40px">
+<div id="info"  style="display: block; float: right; font-size: 40px;">
   <div id="fpsdisplay"></div>
-  <div id="auxdisplay"></div>
   <div id="sizedisplay"></div>
 </div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">3D Scene: </p>
+  <select id="3dscene"style="display: inline-block; float: right; font-size: 40px;">
+    <option value="select1">None</option>
+    <option value="chair96">Chair-96</option>
+    <option value="drums">drums</option>
+    <option value="horns">Horns</option>
+    <option value="trex">Trex</option>
+    <option value="trex128">Trex-128</option>
+    <option value="chair">Chair</option>
+  </select>
+</div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">Quality: <span id="quality_value" style="display: inline-block;"></span></p>
+  <input type="range" id="quality_slider" min="1" max="100" step="1" value="50" class="slider"  style="width: 200px;display: inline-block;">
+</div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">MLP: <span id="channel_value" style="display: inline-block;"></span></p>
+  <input type="range" id="mlp_slider" min="4" max="96" step="1" value="96" class="slider"  style="width: 200px;display: inline-block;">
+</div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">Texture: </p>
+  <select id="texture"style="display: inline-block; float: right; font-size: 40px;">
+    <option value="png">Default</option>
+    <option value="pngx">Advanced</option>
+  </select>
+</div>
+
+<div style="clear: both;"></div>
+
+<div class="png_slider_container" style="display: block; float: right; font-size: 40px;">
+  <div>
+    <label for="bit_depth">D:</label>
+    <span id="bit_depth_value">8</span>
+    <input type="range" id="bit_depth" min="1" max="8" step="1" value="8" class="slider" style="width: 200px;">
+  </div>
+
+  <div>
+    <label for="filter">F:</label>
+    <span id="filter_value">0</span>
+    <input type="range" id="filter" min="0" max="10" step="1" value="10" class="slider" style="width: 200px;">
+  </div>
+
+  <div>
+    <label for="level">L:</label>
+    <span id="level_value">9</span>
+    <input type="range" id="level" min="0" max="9" step="1" value="9" class="slider" style="width: 200px;">
+  </div>
+
+  <div>
+    <label for="strategy">S:</label>
+    <span id="strategy_value">0</span>
+    <input type="range" id="strategy" min="0" max="4" step="1" value="4" class="slider" style="width: 200px;">
+  </div>
+</div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">Mesh: </p>
+  <select id="mesh"style="display: inline-block; float: right; font-size: 40px;">
+    <option value="obj">Default</option>
+  <option value="drc">Advanced</option>
+  </select>
+</div>
+
+<div style="clear: both;"></div>
+
+<div class="draco_slider_container" style="display: block; float: right; font-size: 40px;">
+  <div>
+    <label for="pos_attr">QP:</label>
+    <span id="pos_attr_value">11</span>
+    <input type="range" id="pos_attr" min="0" max="14" step="1" value="0" class="slider" style="width: 200px;">
+  </div>
+
+  <div>
+    <label for="tex_attr">QT:</label>
+    <span id="tex_attr_value">10</span>
+    <input type="range" id="tex_attr" min="0" max="14" step="1" value="0" class="slider" style="width: 200px;">
+  </div>
+
+  <div>
+    <label for="draco_level">CL:</label>
+    <span id="draco_level_value">7</span>
+    <input type="range" id="draco_level" min="0" max="10" step="1" value="0" class="slider" style="width: 200px;">
+  </div>
+</div>
+
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">Dev:</p>
+  <button id="snapshot" style="display: block; float: right; font-size: 40px;">Snapshot</button>
+</div>
+
+
+
 
 <!-- Write to G-Buffer -->
 <script id="gbuffer-vert" type="x-shader/x-vertex">
@@ -74,6 +182,8 @@
   // cache as more sites start using the static URL.
 </script>
 
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
 <script type="module">
   import * as THREE from "https://unpkg.com/three?module";
 
@@ -84,11 +194,12 @@
   import { OrbitControls } from "https://unpkg.com/three/examples/jsm/controls/OrbitControls.js?module";
 
   import { DRACOLoader } from 'https://unpkg.com/three/examples/jsm/loaders/DRACOLoader.js?module';
+  
 
   // copied and slightly modified from SNeRG
 
   //the MLP
-  const viewDependenceNetworkShaderFunctions = `
+  const viewDependenceNetworkShaderFunctions_sn = `
     precision mediump float;
 
     layout(location = 0) out vec4 pc_FragColor;
@@ -123,6 +234,99 @@
             input_value =
                 (j == 8) ? viewdir.r : (
                 (j == 9) ? -viewdir.b : viewdir.g); //switch y-z axes
+            }
+            for (int i = 0; i < NUM_CHANNELS_ONE; ++i) {
+            intermediate_one[i] += input_value *
+                texelFetch(weightsZero, ivec2(j, i), 0).x;
+            }
+        }
+        mediump float intermediate_two[NUM_CHANNELS_TWO] = float[](
+            BIAS_LIST_ONE
+        );
+        for (int j = 0; j < NUM_CHANNELS_ONE; ++j) {
+            if (intermediate_one[j] <= 0.0) {
+                continue;
+            }
+            for (int i = 0; i < NUM_CHANNELS_TWO; ++i) {
+                intermediate_two[i] += intermediate_one[j] *
+                    texelFetch(weightsOne, ivec2(j, i), 0).x;
+            }
+        }
+        mediump float result[NUM_CHANNELS_THREE] = float[](
+            BIAS_LIST_TWO
+        );
+        for (int j = 0; j < NUM_CHANNELS_TWO; ++j) {
+            if (intermediate_two[j] <= 0.0) {
+                continue;
+            }
+            for (int i = 0; i < NUM_CHANNELS_THREE; ++i) {
+                result[i] += intermediate_two[j] *
+                    texelFetch(weightsTwo, ivec2(j, i), 0).x;
+            }
+        }
+        for (int i = 0; i < NUM_CHANNELS_THREE; ++i) {
+            result[i] = 1.0 / (1.0 + exp(-result[i]));
+        }
+        return vec3(result[0]*viewdir.a+(1.0-viewdir.a),
+                    result[1]*viewdir.a+(1.0-viewdir.a),
+                    result[2]*viewdir.a+(1.0-viewdir.a));
+      }
+
+
+    void main() {
+
+        vec4 diffuse0 = texture( tDiffuse0x, vUv );
+        if (diffuse0.a < 0.6) discard;
+        vec4 diffuse1 = texture( tDiffuse1x, vUv );
+        vec4 diffuse2 = texture( tDiffuse2x, vUv );
+
+        //deal with iphone
+        diffuse0.a = diffuse0.a*2.0-1.0;
+        diffuse1.a = diffuse1.a*2.0-1.0;
+        diffuse2.a = diffuse2.a*2.0-1.0;
+
+        //pc_FragColor.rgb  = diffuse1.rgb;
+        pc_FragColor.rgb = evaluateNetwork(diffuse1,diffuse2,diffuse0);
+        pc_FragColor.a = 1.0;
+    }
+`;
+
+//the MLP
+const viewDependenceNetworkShaderFunctions_ff = `
+    precision mediump float;
+
+    layout(location = 0) out vec4 pc_FragColor;
+
+    in vec2 vUv;
+
+    uniform mediump sampler2D tDiffuse0x;
+    uniform mediump sampler2D tDiffuse1x;
+    uniform mediump sampler2D tDiffuse2x;
+
+    uniform mediump sampler2D weightsZero;
+    uniform mediump sampler2D weightsOne;
+    uniform mediump sampler2D weightsTwo;
+
+    mediump vec3 evaluateNetwork( mediump vec4 f0, mediump vec4 f1, mediump vec4 viewdir) {
+        mediump float intermediate_one[NUM_CHANNELS_ONE] = float[](
+            BIAS_LIST_ZERO
+        );
+        for (int j = 0; j < NUM_CHANNELS_ZERO; ++j) {
+            mediump float input_value = 0.0;
+            if (j < 4) {
+            input_value =
+                (j == 0) ? f0.r : (
+                (j == 1) ? f0.g : (
+                (j == 2) ? f0.b : f0.a));
+            } else if (j < 8) {
+            input_value =
+                (j == 4) ? f1.r : (
+                (j == 5) ? f1.g : (
+                (j == 6) ? f1.b : f1.a));
+            } else {
+            input_value =
+                (j == 8) ? viewdir.r : (
+                (j == 9) ? viewdir.g : viewdir.b);
             }
             for (int i = 0; i < NUM_CHANNELS_ONE; ++i) {
             intermediate_one[i] += input_value *
@@ -257,10 +461,18 @@
     let channelsTwo = network_weights["1_bias"].length;
     let channelsThree = network_weights["2_bias"].length;
 
-    let fragmentShaderSource = viewDependenceNetworkShaderFunctions.replace(
-      new RegExp("NUM_CHANNELS_ZERO", "g"),
-      channelsZero
-    );
+    var fragmentShaderSource;
+    if(isSynthetic){
+      fragmentShaderSource = viewDependenceNetworkShaderFunctions_sn.replace(
+        new RegExp("NUM_CHANNELS_ZERO", "g"),
+        channelsZero
+      );
+    }else{
+      fragmentShaderSource = viewDependenceNetworkShaderFunctions_ff.replace(
+        new RegExp("NUM_CHANNELS_ZERO", "g"),
+        channelsZero
+      );
+    }
     fragmentShaderSource = fragmentShaderSource.replace(
       new RegExp("NUM_CHANNELS_ONE", "g"),
       channelsOne
@@ -299,51 +511,158 @@
   let gLastFrame = window.performance.now();
   let oldMilliseconds = 1000;
 
-  const preset_size_w = 800;
-  const preset_size_h = 800;
+  var animation_id = 0;
+
+  var synthericList = ["chair", "drums", "ficus", "hotdog",
+                      "lego", "materials", "mic", "ship"];
+  let selected_scene = document.getElementById("3dscene").value;
+
+  var isSynthetic = false;
+  var preset_size_w = 800, preset_size_h = 1008;
   const object_rescale = 0.1;
 
-  // Configure decoder and create loader.
-  // var dracoLoader = new THREE.DRACOLoader();
-  // const dracoLoader = new THREE.DRACOLoader();
-  // var light = new THREE.HemisphereLight( 0x443333, 0x111122 );
+  // Function to handle selection
+  var scene_selection = document.getElementById("3dscene");
+  scene_selection.onchange = function () {
+    var selectedOption = document.getElementById("3dscene").value;
+    isSynthetic = synthericList.includes(selectedOption.replace(/\d+/g, ''));
+    if (selectedOption == 'select1') return;
+    if (isSynthetic){
+      preset_size_w = 800;
+      preset_size_h = 800;
+    }else{
+      preset_size_w = 1008;
+      preset_size_h = 756;
+    }
+    init();
+  }
   
-  init();
+  var quality_slider = document.getElementById("quality_slider");
+  var quality_output = document.getElementById("quality_value");
+  quality_output.innerHTML = quality_slider.value;
+  quality_slider.oninput = function() {
+    quality_output.innerHTML = this.value;
+  }
+
+  var mlp_slider = document.getElementById("mlp_slider");
+  var mlp_output = document.getElementById("channel_value");
+  mlp_output.innerHTML = mlp_slider.value;
+  mlp_slider.oninput = function(){
+    mlp_output.innerHTML = this.value;
+  }
+  mlp_slider.onchange = function() {
+    // create a pruned network with POST
+    let object_name = document.getElementById("3dscene").value;
+    fetch('http://130.126.139.208:8000/prune_request', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({channel: mlp_slider.value,object_name: object_name})  // Send data to Python server
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log(data);  // Process the response from Python
+        init();
+    })
+    .catch(error => {
+        console.error('Error:', error);
+    });
+  }
+
+  // PNG config
+  var sliders = document.querySelectorAll('.png_slider_container .slider');
+  sliders.forEach(function(slider) {
+    var valueId = slider.id + '_value';
+    var valueElement = document.getElementById(valueId);
+    valueElement.innerHTML = slider.value;
+    slider.addEventListener('input', function() {
+      valueElement.innerHTML = this.value;
+    });
+    slider.addEventListener('change', function() {
+      let tex_type = document.getElementById("texture").value
+      if (tex_type != 'png'){
+        // prepare the file with POST
+        let object_name = document.getElementById("3dscene").value;
+        let bit_depth = document.getElementById("bit_depth").value;
+        let filter = document.getElementById("filter").value;
+        let level = document.getElementById("level").value;
+        let strategy = document.getElementById("strategy").value;
+        fetch('http://130.126.139.208:8000/png_request', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({d: bit_depth, f:filter, l:level, s: strategy, object_name:object_name})  // Send data to Python server
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log(data);  // Process the response from Python
+            init();
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+      }
+    });
+  });
+
+  // draco config
+  var sliders = document.querySelectorAll('.draco_slider_container .slider');
+  sliders.forEach(function(slider) {
+    var valueId = slider.id + '_value';
+    var valueElement = document.getElementById(valueId);
+    valueElement.innerHTML = slider.value;
+    slider.addEventListener('input', function() {
+      valueElement.innerHTML = this.value;
+    });
+    slider.addEventListener('change', function() {
+      let mesh_type = document.getElementById("mesh").value
+      if (mesh_type != 'obj'){
+        // prepare the file with POST
+        let object_name = document.getElementById("3dscene").value;
+        let pos_attr = document.getElementById("pos_attr").value;
+        let tex_attr = document.getElementById("tex_attr").value;
+        let draco_level = document.getElementById("draco_level").value;
+        fetch('http://130.126.139.208:8000/draco_request', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({qp: pos_attr, qt:tex_attr, cl: draco_level, object_name:object_name})  // Send data to Python server
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log(data);  // Process the response from Python
+            init();
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+      }
+    });
+  });
+
+  
+  // init();
+
+  var manager = new THREE.LoadingManager();
 
   function init() {
-    const params = new URL(window.location.href).searchParams;
-    const objname = params.get("obj");
-    const meshtype = params.get("mesh");
-    const textype = params.get("tex");
-    const mlptype = params.get("mlp");
+    let obj_name = document.getElementById("3dscene").value
+    // range
+    let mlp_type = document.getElementById("mlp_slider").value
+    // obj or drc
+    let mesh_type = document.getElementById("mesh").value
+    // png or pngx
+    let tex_type = document.getElementById("texture").value
 
-    let obj_name = "chair";
-    if (objname) {
-      obj_name = objname;
-    }
-
-    let mesh_type = "obj"
-    if (meshtype) {
-      mesh_type = meshtype
-    }
-
-    let tex_type = "png"
-    if (textype) {
-      tex_type = textype
-    }
-
-    let mlp_type = "raw"
-    if (mlptype) {
-      mlp_type = mlptype
-    }
-
-    if (mlp_type == 'raw') {
+    if (mlp_type == document.getElementById("texture").max) {
       var JSONFile = obj_name + "_phone/mlp.json";
     }
     else{
-      var JSONFile = obj_name + "_phone/mlp_prune.json";
+      var JSONFile = obj_name + "_phone/mlp_p.json";
     }
-
 
     if (WebGL.isWebGL2Available() === false) {
       document.body.appendChild(WebGL.getWebGL2ErrorMessage());
@@ -351,6 +670,9 @@
     }
 
     container = document.getElementById("container");
+    while (container.firstChild) {
+        container.removeChild(container.firstChild);
+    }
     renderer = new THREE.WebGLRenderer({
       powerPreference: "high-performance",
       precision: "highp",
@@ -373,18 +695,36 @@
       renderTarget.texture[i].type = THREE.FloatType;
     }
 
-    camera = new THREE.PerspectiveCamera(
-      39,
+    if (isSynthetic){
+      camera = new THREE.PerspectiveCamera(
+        39,
+        preset_size_w / preset_size_h,
+        2 * object_rescale,
+        6 * object_rescale
+      );
+      // camera.position.x = -3.0 * object_rescale;
+      camera.position.y = 2.0 * object_rescale;
+      camera.position.z = 3.464 * object_rescale;
+    }else{
+      camera = new THREE.PerspectiveCamera(
+      50,
       preset_size_w / preset_size_h,
-      2 * object_rescale,
-      6 * object_rescale
-    );
-    camera.position.y = 2.0 * object_rescale;
-    camera.position.z = 3.464 * object_rescale;
+      0.5 * object_rescale,
+      25 * object_rescale
+      );
+      camera.position.z = 1 * object_rescale;
+    }
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.screenSpacePanning = true;
+    controls.touches.ONE = THREE.TOUCH.PAN;
+    controls.touches.TWO = THREE.TOUCH.DOLLY_ROTATE;
+    // added features
+    // controls.autoRotate = true
+
+    // add Screenshot listener
+    document.getElementById("snapshot").addEventListener('click', snapshot);
 
     scene = new THREE.Scene();
 
@@ -400,19 +740,18 @@
             var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.png";
           }
           else{
-            var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.4.png";
-            var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.4.png";
+            var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.x.png";
+            var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.x.png";
           }
-          let tex0 = new THREE.TextureLoader().load(
+          let tex0 = new THREE.TextureLoader(manager).load(
             feat0name,
             function (texture) {
-              // document.getElementById("auxdisplay").innerHTML = JSON.stringify(tex0, null, 4);
               render();
             }
           );
           tex0.magFilter = THREE.NearestFilter;
           tex0.minFilter = THREE.NearestFilter;
-          let tex1 = new THREE.TextureLoader().load(
+          let tex1 = new THREE.TextureLoader(manager).load(
             feat1name,
             function (texture) {
               render();
@@ -422,12 +761,8 @@
           tex1.minFilter = THREE.NearestFilter;
           let newmat = new THREE.RawShaderMaterial({
             side: THREE.DoubleSide,
-            vertexShader: document
-              .querySelector("#gbuffer-vert")
-              .textContent.trim(),
-            fragmentShader: document
-              .querySelector("#gbuffer-frag")
-              .textContent.trim(),
+            vertexShader: document.querySelector("#gbuffer-vert").textContent.trim(),
+            fragmentShader: document.querySelector("#gbuffer-frag").textContent.trim(),
             uniforms: {
               tDiffuse0: { value: tex0 },
               tDiffuse1: { value: tex1 },
@@ -438,7 +773,7 @@
           if (mesh_type == "drc")
           {
             // Instantiate a loader
-            const loader = new DRACOLoader();
+            const loader = new DRACOLoader(manager);
 
             // Specify path to a folder containing WASM/JS decoding libraries.
             loader.setDecoderPath( 'https://www.gstatic.com/draco/versioned/decoders/1.5.6/' );
@@ -453,7 +788,6 @@
               function ( geometry ) {
                 var material = new THREE.MeshStandardMaterial( { vertexColors: THREE.VertexColors } );
                 var object = new THREE.Mesh( geometry, material );
-                // document.getElementById("auxdisplay").innerHTML = 'Add latency here.';
                 object.traverse(function (child) {
                   if (child.type == "Mesh") {
                     child.material = newmat;
@@ -462,11 +796,15 @@
                 object.scale.x = object_rescale;
                 object.scale.y = object_rescale;
                 object.scale.z = object_rescale;
+                if (!isSynthetic){
+                  object.position.z = 1 * object_rescale;
+                }
                 scene.add(object);
               }
             );}
           else
-            {new OBJLoader().load(
+          {
+            new OBJLoader(manager).load(
               obj_name + "_phone/shape" + i.toFixed(0) + ".obj",
               function (object) {
                 object.traverse(function (child) {
@@ -477,11 +815,15 @@
                 object.scale.x = object_rescale;
                 object.scale.y = object_rescale;
                 object.scale.z = object_rescale;
+                if (!isSynthetic){
+                  object.position.z = 1 * object_rescale;
+                }
                 scene.add(object);
               }
-            );}
+            );
+          }
         }
-
+        
         let network_weights = json;
         let fragmentShaderSource =
           createViewDependenceFunctions(network_weights);
@@ -553,7 +895,10 @@
   }
 
   function animate() {
-    requestAnimationFrame(animate);
+    if (animation_id != 0){
+      cancelAnimationFrame( animation_id );
+    }
+    animation_id = requestAnimationFrame(animate);
 
     controls.update();
 
@@ -571,4 +916,104 @@
 
     updateFPSCounter();
   }
+
+  function snapshot() {
+    var azimuthalAngle = Math.random() * Math.PI * 2; // Random angle between 0 and 2π
+    var polarAngle = Math.random() * Math.PI - Math.PI / 2; // Random angle between -π/2 and π/2
+
+    // Calculate new camera position based on spherical coordinates
+    var radius = camera.position.length();
+    camera.position.setFromSphericalCoords(radius, polarAngle, azimuthalAngle);
+    controls.update();
+
+    // render scene into target
+    renderer.setRenderTarget(renderTarget);
+    renderer.render(scene, camera);
+
+    // render post FX
+    renderer.setRenderTarget(null);
+    renderer.render(postScene, postCamera);
+    
+    renderer.domElement.toBlob(function(blob){
+      var a = document.createElement('a');
+      var url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = 'snapshot.png';
+      a.click();
+    }, 'image/png', 1.0);
+    }
+  
+  var socket = io.connect('http://' + document.domain + ':' + location.port);
+
+  socket.on('message_to_html', function(message) {
+    // set to correct parameter
+    // scene
+    let selectedOption = message['scene_option']
+    document.getElementById("3dscene").value = selectedOption;
+    // mlp
+    document.getElementById("mlp_slider").value = message['mlp'];
+    // texture
+    document.getElementById("texture").value = 'pngx';
+    // mesh
+    document.getElementById("mesh").value = 'drc';
+    // test or groundtruth
+    let prefix = message['prefix']
+
+    isSynthetic = synthericList.includes(selectedOption.replace(/\d+/g, ''));
+    if (isSynthetic){
+      preset_size_w = 800;
+      preset_size_h = 800;
+    }else{
+      preset_size_w = 1008;
+      preset_size_h = 756;
+    }
+    // init
+    manager.onLoad = function () {
+      var formData = new FormData();
+      formData.append('prefix', prefix);
+      var promises = [];
+      for (let i = 0; i < message['num_samples']; i++) {
+        
+        var azimuthalAngle = message['azimuthal_angle'][i]; // Random angle between 0 and 2π
+        var polarAngle = message['polar_angle'][i]; // Random angle between -π/2 and π/2
+
+        // Calculate new camera position based on spherical coordinates
+        var radius = camera.position.length();
+        camera.position.setFromSphericalCoords(radius, polarAngle, azimuthalAngle);
+        controls.update();
+
+        // render scene into target
+        renderer.setRenderTarget(renderTarget);
+        renderer.render(scene, camera);
+
+        // render post FX
+        renderer.setRenderTarget(null);
+        renderer.render(postScene, postCamera);
+
+        // save data from one config
+        var promise = new Promise(function(resolve) {
+            renderer.domElement.toBlob(function(blob) {
+                formData.append('images', blob, '${i}.png');
+                resolve();
+            }, 'image/png', 1.0);
+        });
+
+        promises.push(promise);
+      }
+      Promise.all(promises).then(function() {
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/save_images');
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                console.log('Request completed:',message);
+            } else {
+                console.error('Error saving images:', xhr.statusText);
+            }
+        };
+        xhr.send(formData);
+    });
+      
+    }
+    init();
+  });
 </script>

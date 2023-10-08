@@ -5,8 +5,8 @@
 # bit_width
 # 
 
-object_name = "horns"
-prune_ratio = 0.5
+object_name = "chair24"
+prune_chan = 2
 
 # prune cfg
 use_prune = True
@@ -103,20 +103,18 @@ if use_prune:
 
     # prune channels
     for i in range(prunable_num):
-        ci = channel_imp[i]
-        flat_imp = np.array(ci)
+        flat_imp = np.array(channel_imp[i])
         sorted_imp = np.sort(flat_imp)
-        thre_index = int(len(sorted_imp) * prune_ratio)
-        threshold = sorted_imp[thre_index]
+        threshold = sorted_imp[-prune_chan]
         in_weight_name = f'{i}_weights'
         out_weight_name = f'{i+1}_weights'
         in_bias_name = f'{i}_bias'
-        # data[in_weight_name] = np.array(data[in_weight_name])[:,ci>=threshold].tolist()
-        # data[out_weight_name] = np.array(data[out_weight_name])[ci>=threshold].tolist()
-        # data[in_bias_name] = np.array(data[in_bias_name])[ci>=threshold].tolist()
-        data[in_weight_name] = np.array(data[in_weight_name]).repeat(6,axis=1).tolist()
-        data[out_weight_name] = np.array(data[out_weight_name]).repeat(6,axis=0).tolist()
-        data[in_bias_name] = np.array(data[in_bias_name]).repeat(6).tolist()
+        data[in_weight_name] = np.array(data[in_weight_name])[:,channel_imp[i]>=threshold].tolist()
+        data[out_weight_name] = np.array(data[out_weight_name])[channel_imp[i]>=threshold].tolist()
+        data[in_bias_name] = np.array(data[in_bias_name])[channel_imp[i]>=threshold].tolist()
+        # data[in_weight_name] = np.array(data[in_weight_name]).repeat(6,axis=1).tolist()
+        # data[out_weight_name] = np.array(data[out_weight_name]).repeat(6,axis=0).tolist()
+        # data[in_bias_name] = np.array(data[in_bias_name]).repeat(6).tolist()
 
     # check results
     for obj in data:
@@ -125,5 +123,5 @@ if use_prune:
             print(obj, param.shape)
 
     # write to json
-    with open(object_name + '_phone/mlp_prune.json', 'wb') as f:
+    with open(object_name + f'_phone/mlp_p{prune_chan}.json', 'wb') as f:
         f.write(json.dumps(data).encode('utf-8'))
