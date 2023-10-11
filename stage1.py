@@ -1578,7 +1578,7 @@ for i in train_iter:
     gc.collect()
 
     vars = flax.jax_utils.unreplicate(model_vars)
-    pickle.dump(vars, open(weights_dir+"/s1_"+"tmp_state"+str(i)+".pkl", "wb"))
+    pickle.dump(vars, open(weights_dir+"/s1_"+"ckpt.pkl", "wb"))
 
     print('Elapsed training time: %d min %d sec.'
           % (t_total // 60, int(t_total) % 60), end=',')

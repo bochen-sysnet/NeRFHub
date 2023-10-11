@@ -2,6 +2,9 @@ import requests
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.optimize import minimize
 from pymoo.core.problem import Problem
+import lpips
+import torch
+from torchvision import transforms
 import numpy as np
 import os
 import glob
@@ -13,6 +16,8 @@ import random
 import math
 import json
 import subprocess
+import cv2
+from commons import ssim_fn, AverageMeter
 
 # run as a thread
 # share a pipe of received data
@@ -21,24 +26,41 @@ import subprocess
 class MyProblem(Problem):
     def __init__(self):
         super().__init__(n_var=7, n_obj=2, n_constr=0, 
-                         xl=[1,0,0,0,0,0,0], xu=[8,10,9,4,14,14,10], vtype=int)
+                         xl=[1,0,0,0,0,0,0,4], xu=[8,10,9,4,14,14,10,96], vtype=int)
 
     def _evaluate(self, x, out, *args, **kwargs):
-        # send config to html for test
+        points = []
+        for row in range(x.shape[0]):
+            psnr,size = eval_config(probe_config=x[row,:])
+            points += [[psnr,size]]
 
         # retrieve result and return
-        out["F"] = - np.min(x * [3, 1], axis=1)
+        out["F"] = np.array(points)
+
 
 default_config = [8,10,9,4,0,0,0,96]
 url = 'http://130.126.139.208:8000/send_message'
-num_samples = 3
+num_samples = 10
+# Define the LPIPS model
+loss_fn_alex = lpips.LPIPS(net='alex')  # You can also use 'vgg' or 'squeeze' here
 
-def prune(prune_chan, object_name):
+# Define the transformation to ensure images have the right format
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((256, 256)),
+    transforms.ToTensor()
+])
+
+def prune(prune_chan, d, object_name):
     # the number of prunable layers is hard-coded to 2 in MobileNeRF
     prunable_num = 2
     channel_imp = [[] for _ in range(prunable_num)]
-    with open(object_name + '_phone/mlp.json', 'r') as file:
-        data = json.load(file)
+    if d == 8:
+        with open(object_name + '_phone/mlp.json', 'r') as file:
+            data = json.load(file)
+    else:
+        with open(object_name + f'_phone/mlp.{d}.json', 'r') as file:
+            data = json.load(file)
 
     # cal importance
     for obj in data:
@@ -92,40 +114,69 @@ def png(d,f,l,s,object_name):
     png_files = glob.glob(pattern)
     for file in png_files:
         basename = file[:-4]
-        # the problem is the 1/17 pad seems to create a lot of white tone
-        subprocess.run(["convert",
-                        basename + '.png',
-                        '-depth', f'{d}',
-                        '-define', f'png:compression-filter={f}',
-                        '-define', f'png:compression-level={l}',
-                        '-define', f'png:compression-strategy={s}',
-                        basename + '.x.png',
-                        ], 
-                        stdout=subprocess.PIPE, text=True)
+        if d == 8:
+            subprocess.run(["convert",
+                            basename + '.png',
+                            '-depth', f'{d}',
+                            '-define', f'png:compression-filter={f}',
+                            '-define', f'png:compression-level={l}',
+                            '-define', f'png:compression-strategy={s}',
+                            basename + '.x.png',
+                            ], 
+                            stdout=subprocess.PIPE, text=True)
+        else:
+            img = cv2.imread(file,cv2.IMREAD_UNCHANGED)
+            img[:,:,3] = (img[:,:,3] - 128) * 2
+            mult = 2**(8-d)
+            img = img//mult*mult
+            img[:,:,3] = img[:,:,3] // 2 + 128
+            cv2.imwrite('tmp.png', img, [cv2.IMWRITE_PNG_COMPRESSION,9])
+            subprocess.run(["convert",
+                            'tmp.png',
+                            '-depth', f'8',
+                            '-define', f'png:compression-filter={f}',
+                            '-define', f'png:compression-level={l}',
+                            '-define', f'png:compression-strategy={s}',
+                            basename + '.x.png',
+                            ], 
+                            stdout=subprocess.PIPE, text=True)
 
-def eval_one_config(config, object_name, prefix, azimuthal_angle, polar_angle):
+def eval_one_model(config, object_name, prefix, azimuthal_angle, polar_angle, baseline=False):
     d,f,l,s,qp,qt,cl,mlp_channel = config
 
-    # mlp prune
-    prune(mlp_channel,object_name)
+    if not baseline:
+        texture = 'pngx'
+        mesh = 'drc'
+        # mlp prune
+        prune(mlp_channel,d,object_name)
 
-    # mesh compression
-    draco(qp,qt,cl,object_name)
+        # mesh compression
+        draco(qp,qt,cl,object_name)
 
-    # texture compression
-    png(d,f,l,s,object_name)
+        # texture compression
+        png(d,f,l,s,object_name)
+    else:
+        texture = 'png'
+        mesh = 'obj'
+        mlp_channel = 96
 
     # calculate file size
-    size = os.path.getsize(object_name + '_phone/mlp_p.json')
+    mlp_size = os.path.getsize(object_name + '_phone/mlp_p.json')
 
+    png_size = 0
     for file in glob.glob(object_name + '_phone/shape[0-9].pngfeat[0-9].x.png'):
-        size += os.path.getsize (file)
+        png_size += os.path.getsize (file)
 
+    drc_size = 0
     for file in glob.glob(object_name + f'_phone/' + '*.drc'):
-        size += os.path.getsize (file)
+        drc_size += os.path.getsize (file)
+
+    size = (mlp_size, png_size, drc_size)
 
     # send to html for snapshots
     data = {'mlp':mlp_channel,
+            'tex':texture,
+            'mesh':mesh,
             'scene_option':object_name,
             'azimuthal_angle':azimuthal_angle,
             'polar_angle':polar_angle,
@@ -149,9 +200,49 @@ def eval_one_config(config, object_name, prefix, azimuthal_angle, polar_angle):
         with conn:
             data = conn.recv(1024)
             received_data = pickle.loads(data)
-            print(received_data)
+            # print(received_data)
 
     return size
+
+def eval_config(probe_config = [8,10,9,4,0,0,0,16], baseline_name = 'chair96', target_name = 'chair', base_prefix = 'gt', target_prefix = 're'):
+    # train a 96-model as baseline
+    
+    # two types of objects
+    # 'chair': original 
+    # 'chair96': adaptable version
+    azimuthal_angle = [random.uniform(0, 2*math.pi) for _ in range(num_samples)]
+    polar_angle = [random.uniform(-math.pi, math.pi) for _ in range(num_samples)]
+    eval_one_model(default_config, baseline_name, base_prefix, azimuthal_angle, polar_angle, baseline=True)
+    size = eval_one_model(probe_config, target_name, target_prefix, azimuthal_angle, polar_angle)
+    total_size = sum(size) / 2**20
+
+    # calculate image quality
+    psnr_module = AverageMeter()
+    ssim_module = AverageMeter()
+    lpips_module = AverageMeter()
+    for i in range(1,num_samples+1):
+        gt = cv2.imread(f'profiling/{base_prefix}_{i}.png', cv2.IMREAD_UNCHANGED) 
+        gt1 = gt / 255.0
+        re = cv2.imread(f'profiling/{target_prefix}_{i}.png', cv2.IMREAD_UNCHANGED) 
+        re1 = re / 255.0
+        # psnr
+        psnr = float(-10 * np.log10(np.mean(np.square(re1 - gt1))))
+        psnr_module.update(psnr)
+        # ssim
+        ssim = ssim_fn(re, gt)
+        ssim_module.update(ssim)
+        # lpips
+        image1 = transform(cv2.cvtColor(gt, cv2.COLOR_RGBA2RGB)).unsqueeze(0)  # Assuming image1 is a tensor in range [0, 1]
+        image2 = transform(cv2.cvtColor(re, cv2.COLOR_RGBA2RGB)).unsqueeze(0)  # Assuming image2 is a tensor in range [0, 1]
+        # Calculate the LPIPS metric
+        lpips_value = loss_fn_alex(image1, image2)
+        lpips_module.update(float(lpips_value))
+
+    print(psnr_module.avg, ssim_module.avg, lpips_module.avg, size, total_size)
+
+    return psnr_module.avg, size
+
+
 
 def profiling():
     # the goal is to find similar quality, real-time and low latency config
@@ -159,51 +250,28 @@ def profiling():
     # use xxxxx96 at max channel and lossless compression as gt
     # compare model with less channels or default model to it
     # should handle the case with exact same config as gt
-    # two types of objects
-    # 'chair': original 
-    # 'chair96': adaptable version
-    azimuthal_angle = [random.uniform(0, 2*math.pi) for _ in range(num_samples)]
-    polar_angle = [random.uniform(-math.pi, math.pi) for _ in range(num_samples)]
-    prefix,object_name = 'gt','chair96'
-    size = eval_one_config(default_config, object_name, prefix, azimuthal_angle, polar_angle)
-    print('Total size:',size)
-    prefix,object_name = 're','chair96'
-    probe_config = [8,10,9,4,8,11,0,16]
-    size = eval_one_config(probe_config, object_name, prefix, azimuthal_angle, polar_angle)
-    print('Total size:',size)
-
-    # calculate image quality
-
-    # request one baseline 
-    # request download links with a few angles
-    # download files
-    # compare optimal and customized
-    # calculate result
-
-    # Perform operations on the array
     
-    # problem = MyProblem()
+    problem = MyProblem()
 
-    # algorithm = NSGA2(pop_size=10)
+    algorithm = NSGA2(pop_size=10)
 
-    # res = minimize(problem,
-    #             algorithm,
-    #             ('n_gen', 20),
-    #             seed=1,
-    #             save_history=True)
+    res = minimize(problem,
+                algorithm,
+                ('n_gen', 20),
+                seed=1,
+                save_history=True)
 
-    # print("Best solution found: %s" % res.X)
-    # print("Function value: %s" % res.F)
-    # print("Constraint violation: %s" % res.CV)
-
-    # with open('profiling.log','w') as f:
-    #     f.write(str(res.X) + '\n')
-    #     f.write(str(res.F) + '\n')
-    #     f.write(str([a.pop.get("X").tolist() for a in res.history]) + '\n')
-    #     f.write(str([a.pop.get("F").tolist() for a in res.history]) + '\n')
-    #     f.write(str([a.pop.get("feasible").tolist() for a in res.history]) + '\n')
-
-    # return {"result": "Next configuration"}
+    with open('profiling.log','w') as f:
+        f.write(str(res.X) + '\n')
+        f.write(str(res.F) + '\n')
+        f.write(str([a.pop.get("X").tolist() for a in res.history]) + '\n')
+        f.write(str([a.pop.get("F").tolist() for a in res.history]) + '\n')
+        f.write(str([a.pop.get("feasible").tolist() for a in res.history]) + '\n')
 
 if __name__ == '__main__':
-    profiling()
+    # eval_config(probe_config = [8,10,9,4,0,0,0,96], baseline_name = 'chair96', target_name = 'chair96',)
+    # eval_config(probe_config = [8,10,9,4,0,0,0,48], baseline_name = 'chair96', target_name = 'chair96',)
+    # eval_config(probe_config = [8,10,9,4,0,0,0,16], baseline_name = 'chair96', target_name = 'chair96',)
+    # eval_config(probe_config = [8,10,9,4,0,0,0,8], baseline_name = 'chair96', target_name = 'chair96',)
+    # eval_config(probe_config = [8,10,9,4,0,0,0,4], baseline_name = 'chair96', target_name = 'chair96',)
+    eval_config(probe_config = [8,10,9,4,0,0,0,16], baseline_name = 'chair96', target_name = 'chair',)

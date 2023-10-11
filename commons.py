@@ -1,12 +1,14 @@
 # shared variables and functions
 import jax
 import jax.numpy as np
-import jax.random as random
 import functools
 
 from jax.experimental.host_callback import call
 import copy
 
+
+# whether train multiple mlp
+onn = True
 
 # test at epoch 0
 zero_test = False
@@ -18,9 +20,6 @@ step_init = 1
 # model config
 num_bottleneck_features = 8
 data_type, floatnum = np.float32, 32
-
-# whether train multiple mlp
-onn = False
 
 # single test during training
 pruned_to_test = 0
@@ -41,9 +40,9 @@ else:
 
 
 
-scene_type = "forwardfacing"
-object_name = "fortress"
-scene_dir = "../dataset/nerf_llff_data/"+object_name
+scene_type = "synthetic"
+object_name = "chair"
+scene_dir = "../dataset/nerf_synthetic/"+object_name
 prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
 # synthetic
@@ -53,7 +52,6 @@ prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 # forwardfacing
 # nerf_llff_data
 # fern flower fortress horns leaves orchids room trex
-# flower has some problems
 
 # real360
 # bicycle flowerbed gardenvase stump treehill

@@ -5,11 +5,11 @@
 # bit_width
 # 
 
-object_name = "chair24"
+object_name = "chair96"
 prune_chan = 2
 
 # prune cfg
-use_prune = True
+use_prune = False
 
 # draco config
 # -qp <value>           quantization bits for the position attribute, default=11.
@@ -25,11 +25,11 @@ qg = 8
 cl = 7 #0-10
 
 # png config
-use_png = False
+use_png = True
 f=0 #0-10
 l=9#0-9
 s=0#0-4
-d=4
+d=1
 
 # Define the directory path
 directory_path = object_name + '_phone/'
@@ -44,20 +44,28 @@ import cv2
 # texture compression
 if use_png:
     # texture compression
-    png_files = glob.glob(directory_path + '*.png')
+    png_files = glob.glob(directory_path + '*.tmp.png')
     for file in png_files:
-        basename = file[:-4]
-        print(file)
-        # the problem is the 1/17 pad seems to create a lot of white tone
-        subprocess.run(["convert",
-                        basename + '.png',
-                        '-depth', f'{d}',
-                        '-define', f'png:compression-filter={f}',
-                        '-define', f'png:compression-level={l}',
-                        '-define', f'png:compression-strategy={s}',
-                        basename + '.4.png',
-                        ], 
-                        stdout=subprocess.PIPE, text=True)
+        basename = file[:-8]
+        print(basename)
+        img = cv2.imread(file,cv2.IMREAD_UNCHANGED)
+        img[:,:,3] = (img[:,:,3] - 128) * 2 # 0-255
+        
+        mult = 2**(8-d)
+        valid_pixels = (img[..., 2] != 0)
+        img[valid_pixels] = np.clip(img[valid_pixels] // mult * mult, 1, 255)
+
+        img[:,:,3] = img[:,:,3] // 2 + 128
+        cv2.imwrite(basename + '.png', img, [cv2.IMWRITE_PNG_COMPRESSION,9])
+        # subprocess.run(["convert",
+        #                 basename + '.png',
+        #                 '-depth', f'{d}',
+        #                 '-define', f'png:compression-filter={f}',
+        #                 '-define', f'png:compression-level={l}',
+        #                 '-define', f'png:compression-strategy={s}',
+        #                 basename + '.4.png',
+        #                 ], 
+        #                 stdout=subprocess.PIPE, text=True)
 
 
 

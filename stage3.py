@@ -682,6 +682,7 @@ def get_density_color(pts, vars):
   mlp_features = jax.nn.sigmoid(feature_model.apply(vars[3], pts))
   #discretize
   mlp_features_ = np.round(mlp_features*255).astype(np.uint8)
+  # alpha is encoded in the R component
   mlp_features_0 = np.clip(mlp_features_[...,0:1],1,255)*mlp_alpha[..., None]
   mlp_features_1 = mlp_features_[...,1:]*mlp_alpha[..., None]
   mlp_features_ = np.concatenate([mlp_features_0,mlp_features_1],axis=-1)

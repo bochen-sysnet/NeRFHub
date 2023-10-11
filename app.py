@@ -6,6 +6,7 @@ import json
 import glob,os
 import subprocess
 import socket,pickle
+import cv2
 
 app = Flask(__name__)
 cors = CORS(app)
@@ -56,19 +57,16 @@ def process_request():
     return jsonify({"result": "Next configuration"})
 
 
-@app.route('/prune_request', methods=['POST'])
-def prune_request():
-    data = request.json  # Assuming the request contains JSON data
-
-    # Access the array
-    prune_chan = int(data.get('channel'))
-    object_name = data.get('object_name')
-
+def prune(object_name, prune_chan, d):
     # the number of prunable layers is hard-coded to 2 in MobileNeRF
     prunable_num = 2
     channel_imp = [[] for _ in range(prunable_num)]
-    with open(object_name + '_phone/mlp.json', 'r') as file:
-        data = json.load(file)
+    if d == 8:
+        with open(object_name + '_phone/mlp.json', 'r') as file:
+            data = json.load(file)
+    else:
+        with open(object_name + f'_phone/mlp.{d}.json', 'r') as file:
+            data = json.load(file)
 
     # cal importance
     for obj in data:
@@ -97,6 +95,19 @@ def prune_request():
     with open(object_name + f'_phone/mlp_p.json', 'wb') as f:
         f.write(json.dumps(data).encode('utf-8'))
 
+    print('Prune to ',object_name + f'_phone/mlp_p.json')
+
+@app.route('/prune_request', methods=['POST'])
+def prune_request():
+    data = request.json  # Assuming the request contains JSON data
+
+    # Access the array
+    prune_chan = int(data.get('channel'))
+    object_name = data.get('object_name')
+    d = int(data.get('d'))
+
+    prune(object_name,prune_chan, d)
+
     # compare sizes
     before_size = os.path.getsize(object_name + '_phone/mlp.json')
     after_size = os.path.getsize(object_name + '_phone/mlp_p.json')
@@ -115,7 +126,10 @@ def png_request():
     f = int(data.get('f'))
     l = int(data.get('l'))
     s = int(data.get('s'))
+    c = int(data.get('channel'))
     object_name = data.get('object_name')
+
+    prune(object_name,c,d)
 
     # texture compression
     pattern = object_name + '_phone/shape[0-9].pngfeat[0-9].png'
@@ -123,16 +137,37 @@ def png_request():
     for file in png_files:
         basename = file[:-4]
         print(file)
-        # the problem is the 1/17 pad seems to create a lot of white tone
-        subprocess.run(["convert",
-                        basename + '.png',
-                        '-depth', f'{d}',
-                        '-define', f'png:compression-filter={f}',
-                        '-define', f'png:compression-level={l}',
-                        '-define', f'png:compression-strategy={s}',
-                        basename + '.x.png',
-                        ], 
-                        stdout=subprocess.PIPE, text=True)
+        if d == 8:
+            subprocess.run(["convert",
+                            basename + '.png',
+                            '-depth', f'{d}',
+                            '-define', f'png:compression-filter={f}',
+                            '-define', f'png:compression-level={l}',
+                            '-define', f'png:compression-strategy={s}',
+                            basename + '.x.png',
+                            ], 
+                            stdout=subprocess.PIPE, text=True)
+        else:
+            tmp_file = basename + f'.{d}.png'
+            if not os.path.exists(tmp_file):
+                img = cv2.imread(file,cv2.IMREAD_UNCHANGED)
+                img[:,:,3] = (img[:,:,3] - 128) * 2 # 0-255
+                
+                mult = 2**(8-d) # 1 (d=8), 128 (d=1)
+                valid_pixels = (img[..., 2] != 0)
+                img[valid_pixels] = np.clip(img[valid_pixels] // mult * mult, 1, 255)
+
+                img[:,:,3] = img[:,:,3] // 2 + 128
+                cv2.imwrite(tmp_file, img, [cv2.IMWRITE_PNG_COMPRESSION,9])
+            subprocess.run(["convert",
+                            tmp_file,
+                            '-depth', f'8',
+                            '-define', f'png:compression-filter={f}',
+                            '-define', f'png:compression-level={l}',
+                            '-define', f'png:compression-strategy={s}',
+                            basename + '.x.png',
+                            ], 
+                            stdout=subprocess.PIPE, text=True)
         
     # check size
     pattern = object_name + '_phone/shape[0-9].pngfeat[0-9].x.png'

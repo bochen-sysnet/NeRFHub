@@ -12,9 +12,12 @@
   <select id="3dscene"style="display: inline-block; float: right; font-size: 40px;">
     <option value="select1">None</option>
     <option value="chair96">Chair-96</option>
+    <option value="chair964">Chair-96-4bit</option>
     <option value="drums">drums</option>
     <option value="horns">Horns</option>
     <option value="trex">Trex</option>
+    <option value="flower">Flower</option>
+    <option value="fern">Fern</option>
     <option value="trex128">Trex-128</option>
     <option value="chair">Chair</option>
   </select>
@@ -153,6 +156,7 @@
 
       // write color to G-Buffer
       gColor1 = texture( tDiffuse0, vUv );
+      // This is the alpha value
       if (gColor1.r == 0.0) discard;
       gColor0 = vec4( normalize(rayDirection), 1.0 );
       gColor2 = texture( tDiffuse1, vUv );
@@ -285,7 +289,7 @@
         diffuse1.a = diffuse1.a*2.0-1.0;
         diffuse2.a = diffuse2.a*2.0-1.0;
 
-        //pc_FragColor.rgb  = diffuse1.rgb;
+        // pc_FragColor.rgb  = diffuse1.rgb;
         pc_FragColor.rgb = evaluateNetwork(diffuse1,diffuse2,diffuse0);
         pc_FragColor.a = 1.0;
     }
@@ -553,12 +557,13 @@ const viewDependenceNetworkShaderFunctions_ff = `
   mlp_slider.onchange = function() {
     // create a pruned network with POST
     let object_name = document.getElementById("3dscene").value;
+    let bit_depth = document.getElementById("bit_depth").value;
     fetch('http://130.126.139.208:8000/prune_request', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({channel: mlp_slider.value,object_name: object_name})  // Send data to Python server
+        body: JSON.stringify({channel: mlp_slider.value,object_name: object_name,d: bit_depth})  // Send data to Python server
     })
     .then(response => response.json())
     .then(data => {
@@ -588,12 +593,14 @@ const viewDependenceNetworkShaderFunctions_ff = `
         let filter = document.getElementById("filter").value;
         let level = document.getElementById("level").value;
         let strategy = document.getElementById("strategy").value;
+        let channel = document.getElementById("mlp_slider").value;
         fetch('http://130.126.139.208:8000/png_request', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({d: bit_depth, f:filter, l:level, s: strategy, object_name:object_name})  // Send data to Python server
+            body: JSON.stringify({d: bit_depth, f:filter, l:level, s: strategy, 
+                                object_name:object_name, channel: channel})  // Send data to Python server
         })
         .then(response => response.json())
         .then(data => {
@@ -657,7 +664,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     // png or pngx
     let tex_type = document.getElementById("texture").value
 
-    if (mlp_type == document.getElementById("texture").max) {
+    if (mlp_type == document.getElementById("mlp_slider").max && 8 == document.getElementById("bit_depth").value) {
       var JSONFile = obj_name + "_phone/mlp.json";
     }
     else{
@@ -727,7 +734,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     document.getElementById("snapshot").addEventListener('click', snapshot);
 
     scene = new THREE.Scene();
-
+    
     fetch(JSONFile)
       .then((response) => {
         return response.json();
@@ -769,7 +776,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
             },
             glslVersion: THREE.GLSL3,
           });
-          
+
           if (mesh_type == "drc")
           {
             // Instantiate a loader
@@ -841,7 +848,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
         // PostProcessing setup
         postScene = new THREE.Scene();
         postScene.background = new THREE.Color("rgb(255, 255, 255)");
-        //postScene.background = new THREE.Color("rgb(128, 128, 128)");
+        // postScene.background = new THREE.Color("rgb(128, 128, 128)");
         postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         postScene.add(
           new THREE.Mesh(
@@ -953,9 +960,9 @@ const viewDependenceNetworkShaderFunctions_ff = `
     // mlp
     document.getElementById("mlp_slider").value = message['mlp'];
     // texture
-    document.getElementById("texture").value = 'pngx';
+    document.getElementById("texture").value = message['tex'];
     // mesh
-    document.getElementById("mesh").value = 'drc';
+    document.getElementById("mesh").value = message['mesh'];
     // test or groundtruth
     let prefix = message['prefix']
 

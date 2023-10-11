@@ -40,8 +40,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
 
-phase1 = True
-phase2 = True
+phase1 = False
+phase2 = False
 
 print(jax.local_devices())
 
@@ -113,10 +113,10 @@ if scene_type=="synthetic":
           'test' : load_blender(scene_dir, 'test')}
 
   splits = ['train', 'test']
-  for s in splits:
-    print(s)
-    for k in data[s]:
-      print(f'  {k}: {data[s][k].shape}')
+  # for s in splits:
+  #   print(s)
+  #   for k in data[s]:
+  #     print(f'  {k}: {data[s][k].shape}')
 
   images, poses, hwf = data['train']['images'], data['train']['c2w'], data['train']['hwf']
   write_floatpoint_image(samples_dir+"/training_image_sample.png",images[0])
@@ -1305,11 +1305,6 @@ model_vars = [point_grid, acc_grid,
 point_grid = None
 acc_grid = None
 #%% --------------------------------------------------------------------------------
-# ## Load weights
-#%%
-vars = pickle.load(open(weights_dir+"/"+"weights_stage1.pkl", "rb"))
-model_vars = vars
-#%% --------------------------------------------------------------------------------
 # ## Main rendering functions
 #%%
 def compute_volumetric_rendering_weights_with_alpha(alpha):
@@ -1320,389 +1315,10 @@ def compute_volumetric_rendering_weights_with_alpha(alpha):
   weights = alpha * trans
   return weights
 
-def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): ### antialiasing by supersampling
-
-  #---------- ray-plane intersection points
-  grid_indices, grid_masks = gridcell_from_rays(rays, vars[1], keep_num, threshold)
-
-  pts, grid_masks, points, fake_t = compute_undc_intersection(vars[0],
-                        grid_indices, grid_masks, rays, keep_num)
-
-  if scene_type=="forwardfacing":
-    fake_t = compute_t_forwardfacing(pts,grid_masks)
-  elif scene_type=="real360":
-    skybox_positions, skybox_masks = compute_box_intersection(rays)
-    pts = np.concatenate([pts,skybox_positions], axis=-2)
-    grid_masks = np.concatenate([grid_masks,skybox_masks], axis=-1)
-    pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
-
-  # Now use the MLP to compute density and features
-  mlp_alpha = density_model.apply(vars[2], pts)
-  mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
-  mlp_alpha = mlp_alpha * grid_masks
-
-  weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha) #[N,4,P]
-  acc = np.sum(weights, axis=-1) #[N,4]
-  acc = np.mean(acc, axis=-1) #[N]
-
-  mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
-    np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
-  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b) #[N,4,P]
-  acc_b = np.sum(weights_b, axis=-1) #[N,4]
-  acc_b = np.mean(acc_b, axis=-1) #[N]
-
-  #deferred features
-  mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[3], pts)) #[N,4,P,C]
-  
-  mlp_features = np.sum(weights[..., None] * mlp_features_, axis=-2) #[N,4,C]
-  mlp_features = np.mean(mlp_features, axis=-2) #[N,C]
-  mlp_features_b = np.sum(weights_b[..., None] * mlp_features_, axis=-2) #[N,4,C]
-  mlp_features_b = np.mean(mlp_features_b, axis=-2) #[N,C]
-
-
-  # ... as well as view-dependent colors.
-  dirs = normalize(rays[1]) #[N,4,3]
-  dirs = np.mean(dirs, axis=-2) #[N,3]
-  features_dirs_enc = np.concatenate([mlp_features, dirs], axis=-1) #[N,C+3]
-  features_dirs_enc_b = np.concatenate([mlp_features_b, dirs], axis=-1) #[N,C+3]
-  if onn:
-    tmp_mlp = apply_prune(vars[4],prune_chan=prune_chan)
-    rgb = jax.nn.sigmoid(color_model.apply(tmp_mlp, features_dirs_enc))
-    rgb_b = jax.nn.sigmoid(color_model.apply(tmp_mlp, features_dirs_enc_b))
-  else:
-    rgb = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc))
-    rgb_b = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc_b))
-
-  # Composite onto the background color.
-  if white_bkgd:
-    rgb = rgb * acc[..., None] + (1. - acc[..., None])
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None])
-  else:
-    bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
-          bg_color * (1-wbgcolor)
-    rgb = rgb * acc[..., None] + (1. - acc[..., None]) * bgc
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
-
-  #get acc_grid_masks to update acc_grid
-  acc_grid_masks = get_acc_grid_masks(pts, vars[1])
-  acc_grid_masks = acc_grid_masks*grid_masks
-
-  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks
-#%% --------------------------------------------------------------------------------
-# ## Set up pmap'd rendering for test time evaluation.
-#%%
-test_batch_size = 256*n_device
-test_keep_num = point_grid_size*3//4
-test_threshold = 0.1
-test_wbgcolor = 0.0
-
-
-render_test_p = jax.pmap(lambda rays, vars, prune_chan: render_rays(
-    rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng, prune_chan=prune_chan),
-    in_axes=(0, None, None))
-
-import numpy
-
-def render_test(rays, vars, prune_chan): ### antialiasing by supersampling
-  sh = rays[0].shape
-  rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
-  out = render_test_p(rays, vars, prune_chan)
-  out = [numpy.reshape(numpy.array(out[i]),sh[:-2]+(-1,)) for i in range(4)]
-  return out
-
-def render_loop(rays, vars, chunk, prune_chan=0): ### antialiasing by supersampling
-  sh = list(rays[0].shape[:-2])
-  rays = [x.reshape([-1, 4, 3]) for x in rays]
-  l = rays[0].shape[0]
-  n = jax.local_device_count()
-  p = ((l - 1) // n + 1) * n - l
-  rays = [np.pad(x, ((0,p),(0,0),(0,0))) for x in rays]
-  outs = [render_test([x[i:i+chunk] for x in rays], vars, prune_chan)
-          for i in range(0, rays[0].shape[0], chunk)]
-  outs = [np.reshape(
-      np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(4)]
-  return outs
-
-# Make sure that everything works, by rendering an image from the test set
-
-if scene_type=="synthetic":
-  selected_test_index = 97
-  preview_image_height = 800
-
-elif scene_type=="forwardfacing":
-  selected_test_index = 0
-  preview_image_height = 756//2
-
-elif scene_type=="real360":
-  selected_test_index = 0
-  preview_image_height = 840//2
-
-if zero_test:
-  rays = camera_ray_batch(
-      data['test']['c2w'][selected_test_index], data['test']['hwf'])
-  gt = data['test']['images'][selected_test_index]
-  out = render_loop(rays, model_vars, test_batch_size, pruned_to_test)
-  rgb = out[0]
-  acc = out[1]
-  rgb_b = out[2]
-  acc_b = out[3]
-  write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb.png",rgb)
-  write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb_binarized.png",rgb_b)
-  write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_gt.png",gt)
-  write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc.png",acc)
-  write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc_binarized.png",acc_b)
-#%% --------------------------------------------------------------------------------
-# ## Training loop
-#%%
-
-def lossfun_distortion(x, w):
-  """Compute iint w_i w_j |x_i - x_j| d_i d_j."""
-  # The loss incurred between all pairs of intervals.
-  dux = np.abs(x[..., :, None] - x[..., None, :])
-  losses_cross = np.sum(w * np.sum(w[..., None, :] * dux, axis=-1), axis=-1)
-
-  # The loss incurred within each individual interval with itself.
-  losses_self = np.sum((w[..., 1:]**2 + w[..., :-1]**2) * \
-                       (x[..., 1:] - x[..., :-1]), axis=-1) / 6
-
-  return losses_cross + losses_self
-
-def compute_TV(acc_grid):
-  dx = acc_grid[:-1,:,:] - acc_grid[1:,:,:]
-  dy = acc_grid[:,:-1,:] - acc_grid[:,1:,:]
-  dz = acc_grid[:,:,:-1] - acc_grid[:,:,1:]
-  TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
-  return TV
-
-def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold, model_vars):
-  key, rng = random.split(rng)
-  rays, pixels = random_ray_batch(
-      key, batch_size // n_device, traindata)
-  
-  # randomize pruned channels
-  prune_chan = phase2pruned_channel(random.randint(rng, (), 0, total_phases))
-  
-  def loss_fn(vars):
-    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks = render_rays(
-        rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=prune_chan)
-
-    loss_color_l2_ = np.mean(np.square(rgb_est - pixels))
-    loss_color_l2 = loss_color_l2_ * (1-wbinary)
-    loss_color_l2_b_ = np.mean(np.square(rgb_est_b - pixels))
-    loss_color_l2_b = loss_color_l2_b_ * wbinary
-
-    loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
-    loss_acc += np.mean(np.abs(vars[1])) *1e-5
-    loss_acc += compute_TV(vars[1]) *1e-5
-
-    loss_distortion = np.mean(lossfun_distortion(fake_t, weights)) *wdistortion
-
-    point_loss = np.abs(points)
-    point_loss_out = point_loss *1000.0
-    point_loss_in = point_loss *0.01
-    point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
-    point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
-
-    return loss_color_l2 + loss_color_l2_b + loss_distortion + loss_acc + point_loss, loss_color_l2_b_
-
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (total_loss, color_loss_l2), grad = grad_fn(model_vars)
-  total_loss = jax.lax.pmean(total_loss, axis_name='batch')
-  color_loss_l2 = jax.lax.pmean(color_loss_l2, axis_name='batch')
-
-  grad = jax.lax.pmean(grad, axis_name='batch')
-  # state = state.apply_gradient(grad, learning_rate=lr)
-  adam_kwargs = {'learning_rate': lr,'b1': 0.9,'b2': 0.999,'eps': 1e-15,}
-  optimizer = optax.adam(**adam_kwargs)
-  updates, state = optimizer.update(grad, state)
-  # apply prune on grad
-  prune_grad(model_vars[4], updates[4], prune_chan = prune_chan)
-  model_vars = optax.apply_updates(model_vars, updates)
-
-  return state, color_loss_l2, model_vars
-
-if phase1:
-  train_pstep = jax.pmap(train_step, axis_name='batch',
-                        in_axes=(0, 0, 0, None, None, None, None, None, None, None, 0),
-                        static_broadcasted_argnums = (7,8,))
-  traindata_p = flax.jax_utils.replicate(data['train'])
-  # state = flax.optim.Adam(**adam_kwargs).create(model_vars)
-  state = optimizer.init(model_vars)
-
-  state = flax.jax_utils.replicate(state)
-  model_vars = flax.jax_utils.replicate(model_vars)
-
-  # Training loop
-  psnrs = []
-  iters = []
-  psnrs_test = []
-  psnrs_b_test = []
-  iters_test = []
-  t_total = 0.0
-  t_last = 0.0
-  i_last = step_init
-
-  training_iters = 400000
-  train_psnr_max = 0.0
-
-
-  print("Co-training")
-  psnr_module = AverageMeter()
-  train_iter = tqdm(range(step_init, training_iters + 1))
-  for i in train_iter:
-    t = time.time()
-
-    batch_size = test_batch_size
-    keep_num = test_keep_num
-    threshold = test_threshold
-    lr = 1e-5
-    wbinary = float(i)/training_iters
-    wbgcolor = 1.0
-
-    if scene_type=="synthetic":
-      wdistortion = 0.0
-    elif scene_type=="forwardfacing":
-      wdistortion = 0.01
-    elif scene_type=="real360":
-      wdistortion = 0.001
-
-    rng, key1, key2 = random.split(rng, 3)
-    key2 = random.split(key2, n_device)
-    state, color_loss_l2, model_vars = train_pstep(
-        state, key2, traindata_p,
-        lr,
-        wdistortion,
-        wbinary,
-        wbgcolor,
-        batch_size,
-        keep_num,
-        threshold,
-        model_vars
-        )
-
-    psnrs.append(-10. * np.log10(color_loss_l2[0]))
-    iters.append(i)
-
-    # update modules
-    psnr_module.update(float(-10. * np.log10(color_loss_l2[0])))
-
-    # show result
-    train_iter.set_description(
-        f"{prefix} I:{i}. "
-        f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
-
-    if i > 0:
-      t_total += time.time() - t
-
-    # Logging
-    if (i % 10000 == 0) and i > 0:
-      this_train_psnr = np.mean(np.array(psnrs[-5000:]))
-
-      #stop when iteration>200000 and the training psnr drops
-      if i>200000 and this_train_psnr<=train_psnr_max-0.001:
-        vars = pickle.load(open(weights_dir+"/s2_0_"+"ckpt.pkl", "rb"))
-        break
-
-      train_psnr_max = max(this_train_psnr,train_psnr_max)
-      gc.collect()
-
-      vars = flax.jax_utils.unreplicate(model_vars)
-      pickle.dump(vars, open(weights_dir+"/s2_0_"+"ckpt.pkl", "wb"))
-
-      print('Elapsed time: %d min %d sec.' % (t_total // 60, int(t_total) % 60), end=',')
-
-      print(' Batch size: %d' % batch_size,'Keep num: %d' % keep_num, end = ',')
-      t_elapsed = t_total - t_last
-      i_elapsed = i - i_last
-      t_last = t_total
-      i_last = i
-      print(" Speed:",'%0.3f secs per iter.' % (t_elapsed / i_elapsed),'%0.3f iters per sec.' % (i_elapsed / t_elapsed),end = ',')
-
-      rays = camera_ray_batch(
-          data['test']['c2w'][selected_test_index], data['test']['hwf'])
-      gt = data['test']['images'][selected_test_index]
-      if onn:
-        pruned = 80
-        print(" Pruned:",pruned, end=',')
-      else:
-        pruned = 0
-      out = render_loop(rays, vars, test_batch_size, pruned)
-      rgb = out[0]
-      acc = out[1]
-      rgb_b = out[2]
-      acc_b = out[3]
-      psnrs_test.append(-10 * np.log10(np.mean(np.square(rgb - gt))))
-      psnrs_b_test.append(-10 * np.log10(np.mean(np.square(rgb_b - gt))))
-      iters_test.append(i)
-
-      print("PSNR:",'Training: %0.3f' % this_train_psnr,'Test average: %0.3f' % psnrs_test[-1],'Test binary: %0.3f' % psnrs_b_test[-1])
-
-      plt.figure()
-      plt.title(i)
-      plt.plot(iters, psnrs)
-      plt.plot(iters_test, psnrs_test)
-      plt.plot(iters_test, psnrs_b_test)
-      p = np.array(psnrs)
-      plt.ylim(np.min(p) - .5, np.max(p) + .5)
-      plt.legend()
-      plt.savefig(samples_dir+"/s2_0_"+str(i)+"_loss.png")
-
-      write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_rgb.png",rgb)
-      write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_rgb_binarized.png",rgb_b)
-      write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_gt.png",gt)
-      write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_acc.png",acc)
-      write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_acc_binarized.png",acc_b)
-      
-  #%%
-  #%% --------------------------------------------------------------------------------
-  # ## Save weights
-  #%%
-  pickle.dump(vars, open(weights_dir+"/"+"weights_stage2_0.pkl", "wb"))
-
-#%%
-#%% --------------------------------------------------------------------------------
-## Run test-set evaluation
-# %%
-# gc.collect()
-
-
-# render_poses = data['test']['c2w'][:len(data['test']['images'])]
-# frames = []
-# framemasks = []
-# for pruned in pruned_to_eval:
-#   test_iter = tqdm(render_poses)
-#   psnr_module = AverageMeter()
-#   ssim_module = AverageMeter()
-#   for i, p in enumerate(test_iter):
-#     out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
-#     frames.append(out[2])
-#     framemasks.append(out[3])
-
-#     # PSNR
-#     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
-#     psnr_module.update(float(psnr))
-    
-#     # SSIM
-#     ssim = ssim_fn(out[0], data['test']['images'][i])
-#     ssim_module.update(float(ssim))
-
-#     # display
-#     test_iter.set_description(
-#       f"Test I:{i}. Prune:{pruned}. "
-#       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
-#       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
-
-#%% --------------------------------------------------------------------------------
-# # Fix density and finetune color
-#%% --------------------------------------------------------------------------------
-# ## Load weights
-#%%
-vars = pickle.load(open(weights_dir+"/"+"weights_stage2_0.pkl", "rb"))
-model_vars = vars
 #%% --------------------------------------------------------------------------------
 # ## Main rendering functions
 #%%
-def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): ### antialiasing by supersampling
+def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0, mlp_prec=0): ### antialiasing by supersampling
 
   #---------- ray-plane intersection points
   grid_indices, grid_masks = gridcell_from_rays(rays, vars[1], keep_num, threshold)
@@ -1717,8 +1333,6 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): #
     pts = np.concatenate([pts,skybox_positions], axis=-2)
     grid_masks = np.concatenate([grid_masks,skybox_masks], axis=-1)
     pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
-
-  pts = jax.lax.stop_gradient(pts)
 
   # Now use the MLP to compute density and features
   mlp_alpha = density_model.apply(vars[2], pts)
@@ -1730,18 +1344,25 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): #
   acc_b = np.sum(weights_b, axis=-1) #[N,4]
   acc_b = np.mean(acc_b, axis=-1) #[N]
 
+  acc_b = jax.lax.stop_gradient(acc_b)
+
   #deferred features
-  # vector quantization if possible
   mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[3], pts)) #[N,4,P,C]
+
+  # apply different bitwidth
+  mult = 2**(8 - mlp_prec)
+  mlp_features_ = np.round(mlp_features_*255).astype(mlp_features_.dtype)//mult*mult/255.
 
   mlp_features_b = np.sum(weights_b[..., None] * mlp_features_, axis=-2) #[N,4,C]
   mlp_features_b = np.mean(mlp_features_b, axis=-2) #[N,C]
-
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1]) #[N,4,3]
   dirs = np.mean(dirs, axis=-2) #[N,3]
   features_dirs_enc_b = np.concatenate([mlp_features_b, dirs], axis=-1) #[N,C+3]
+
+  features_dirs_enc_b = jax.lax.stop_gradient(features_dirs_enc_b)
+
   # pruned version
   if onn:
     tmp_mlp = apply_prune(vars[4],prune_chan=prune_chan)
@@ -1761,33 +1382,32 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0): #
 #%% --------------------------------------------------------------------------------
 # ## Set up pmap'd rendering for test time evaluation.
 #%%
-test_batch_size = 256*n_device
 test_keep_num = point_grid_size*3//4
 test_threshold = 0.1
 test_wbgcolor = 0.0
 
 
-render_test_p = jax.pmap(lambda rays, vars, prune_chan: render_rays(
-    rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng, prune_chan),
-    in_axes=(0, None, None))
+render_test_p = jax.pmap(lambda rays, vars, prune_chan, mlp_prec: render_rays(
+    rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng, prune_chan, mlp_prec),
+    in_axes=(0, None, None, None))
 
 import numpy
 
-def render_test(rays, vars, prune_chan): ### antialiasing by supersampling
+def render_test(rays, vars, prune_chan, mlp_prec): ### antialiasing by supersampling
   sh = rays[0].shape
   rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
-  out = render_test_p(rays, vars, prune_chan)
+  out = render_test_p(rays, vars, prune_chan, mlp_prec)
   out = [numpy.reshape(numpy.array(out[i]),sh[:-2]+(-1,)) for i in range(2)]
   return out
 
-def render_loop(rays, vars, chunk, prune_chan=0): ### antialiasing by supersampling
+def render_loop(rays, vars, chunk, prune_chan=0, mlp_prec=0): ### antialiasing by supersampling
   sh = list(rays[0].shape[:-2])
   rays = [x.reshape([-1, 4, 3]) for x in rays]
   l = rays[0].shape[0]
   n = jax.local_device_count()
   p = ((l - 1) // n + 1) * n - l
   rays = [np.pad(x, ((0,p),(0,0),(0,0))) for x in rays]
-  outs = [render_test([x[i:i+chunk] for x in rays], vars, prune_chan)
+  outs = [render_test([x[i:i+chunk] for x in rays], vars, prune_chan, mlp_prec)
           for i in range(0, rays[0].shape[0], chunk)]
   outs = [np.reshape(
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(2)]
@@ -1807,19 +1427,10 @@ elif scene_type=="real360":
   selected_test_index = 0
   preview_image_height = 840//2
 
-# rays = camera_ray_batch(
-#     data['test']['c2w'][selected_test_index], data['test']['hwf'])
-# gt = data['test']['images'][selected_test_index]
-# out = render_loop(rays, model_vars, test_batch_size, pruned_to_test)
-# rgb_b = out[0]
-# acc_b = out[1]
-# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_rgb_binarized.png",rgb_b)
-# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_gt.png",gt)
-# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_acc_binarized.png",acc_b)
 #%% --------------------------------------------------------------------------------
 # ## Training loop
 #%%
-def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold, model_vars):
+def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold, model_vars, mlp_prec):
   key, rng = random.split(rng)
   rays, pixels = random_ray_batch(
       key, batch_size // n_device, traindata)
@@ -1829,7 +1440,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
   
   def loss_fn(vars):
     rgb_est_b, _ = render_rays(
-        rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan)
+        rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan, mlp_prec)
 
     loss_color_l2_b = np.mean(np.square(rgb_est_b - pixels))
 
@@ -1850,35 +1461,56 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
   return state, color_loss_l2, model_vars
 
-if phase2:
-  train_pstep = jax.pmap(train_step, axis_name='batch',
-                        in_axes=(0, 0, 0, None, None, None, None, None, None, None, 0),
-                        static_broadcasted_argnums = (7,8,))
-  traindata_p = flax.jax_utils.replicate(data['train'])
-  state = optimizer.init(model_vars)
+#%% --------------------------------------------------------------------------------
+# # Fix feature and finetune mlp for diffferent precisions/bit-widths
+#%% --------------------------------------------------------------------------------
+# ## Load weights
+#%%
 
+
+obj_save_dir = prefix + "obj"
+if not os.path.exists(obj_save_dir):
+  os.makedirs(obj_save_dir)
+
+with open(obj_save_dir + '/mlp.json', 'r') as file:
+  obj_num = json.load(file)["obj_num"]
+
+train_pstep = jax.pmap(train_step, axis_name='batch',
+                      in_axes=(0, 0, 0, None, None, None, None, None, None, None, 0, None),
+                      static_broadcasted_argnums = (7,8,))
+traindata_p = flax.jax_utils.replicate(data['train'])
+
+test_batch_size = 256*n_device
+
+for mlp_prec in range(1,5):
+  print('Finetune for bitrates:', mlp_prec)
+  vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
+  model_vars = vars
+
+  # rays = camera_ray_batch(
+  #   data['test']['c2w'][selected_test_index], data['test']['hwf'])
+  # gt = data['test']['images'][selected_test_index]
+  # out = render_loop(rays, model_vars, test_batch_size, 80, mlp_prec)
+  # rgb_b = out[0]
+  # acc_b = out[1]
+  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_rgb_binarized.png",rgb_b)
+  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_gt.png",gt)
+  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_acc_binarized.png",acc_b)
+
+  state = optimizer.init(model_vars)
   state = flax.jax_utils.replicate(state)
   model_vars = flax.jax_utils.replicate(model_vars)
 
   # Training loop
   psnrs = []
   iters = []
-  psnrs_test = []
   psnrs_b_test = []
   iters_test = []
-  t_total = 0.0
-  t_last = 0.0
-  i_last = step_init
   psnr_module = AverageMeter()
 
-  training_iters = 100000
-
+  training_iters = 300000
   train_psnr_max = 0.0
-  if onn:
-    training_iters += 100000
-
-  print("Fine-tuning")
-  train_iter = tqdm(range(step_init, training_iters + 1))
+  train_iter = tqdm(range(0, training_iters + 1))
   for i in train_iter:
     t = time.time()
 
@@ -1908,6 +1540,7 @@ if phase2:
         keep_num,
         threshold,
         model_vars,
+        mlp_prec
         )
 
     psnrs.append(-10. * np.log10(color_loss_l2[0]))
@@ -1918,45 +1551,24 @@ if phase2:
 
     # show result
     train_iter.set_description(
-        f"{prefix} I:{i}. "
+        f"{prefix} {mlp_prec} I:{i}. "
         f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
 
-
-    if i > 0:
-      t_total += time.time() - t
-
     # Logging
-    if (i % 10000 == 0) and i > 0:
+    if (i % 10000 == 0):
       this_train_psnr = np.mean(np.array(psnrs[-5000:]))
 
       if onn and i>100000 and this_train_psnr<=train_psnr_max-0.001:
-        vars = pickle.load(open(weights_dir+"/s2_1_"+"ckpt.pkl", "rb"))
         break
 
-      train_psnr_max = max(this_train_psnr,train_psnr_max)
       gc.collect()
-
       vars = flax.jax_utils.unreplicate(model_vars)
-      pickle.dump(vars, open(weights_dir+"/s2_1_"+"ckpt.pkl", "wb"))
-
-      print('Elapsed time: %d min %d sec.' % (t_total // 60, int(t_total) % 60),end=',')
-
-      print(' Batch size: %d' % batch_size,'Keep num: %d' % keep_num,end = ',')
-      t_elapsed = t_total - t_last
-      i_elapsed = i - i_last
-      t_last = t_total
-      i_last = i
-      print(" Speed:",'%0.3f secs per iter.' % (t_elapsed / i_elapsed),'%0.3f iters per sec.' % (i_elapsed / t_elapsed),end = ',')
 
       rays = camera_ray_batch(
           data['test']['c2w'][selected_test_index], data['test']['hwf'])
       gt = data['test']['images'][selected_test_index]
-      if onn:
-        pruned = 80
-        print(" Pruned:",pruned, end=',')
-      else:
-        pruned = 0
-      out = render_loop(rays, vars, test_batch_size, pruned)
+      pruned = 80
+      out = render_loop(rays, vars, test_batch_size, pruned, mlp_prec)
       rgb_b = out[0]
       acc_b = out[1]
       psnrs_b_test.append(-10 * np.log10(np.mean(np.square(rgb_b - gt))))
@@ -1971,45 +1583,24 @@ if phase2:
       p = np.array(psnrs)
       plt.ylim(np.min(p) - .5, np.max(p) + .5)
       plt.legend()
-      plt.savefig(samples_dir+"/s2_1_"+str(i)+"_loss.png")
+      plt.savefig(samples_dir+f"/s4_{mlp_prec}__"+str(i)+"_loss.png")
 
-      write_floatpoint_image(samples_dir+"/s2_1_"+str(i)+"_rgb_binarized.png",rgb_b)
-      write_floatpoint_image(samples_dir+"/s2_1_"+str(i)+"_gt.png",gt)
-      write_floatpoint_image(samples_dir+"/s2_1_"+str(i)+"_acc_binarized.png",acc_b)
-    
+      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_rgb_binarized.png",rgb_b)
+      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_gt.png",gt)
+      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_acc_binarized.png",acc_b)
+
   #%%
-  #%% --------------------------------------------------------------------------------
-  # ## Save weights
-  #%%
-  pickle.dump(vars, open(weights_dir+"/"+"weights_stage2_1.pkl", "wb"))
+  #export weights for the MLP
+  mlp_params = {}
+  vars = flax.jax_utils.unreplicate(model_vars)
+  mlp_params['0_weights'] = vars[4]['params']['Dense_0']['kernel'].tolist()
+  mlp_params['1_weights'] = vars[4]['params']['Dense_1']['kernel'].tolist()
+  mlp_params['2_weights'] = vars[4]['params']['Dense_2']['kernel'].tolist()
+  mlp_params['0_bias'] = vars[4]['params']['Dense_0']['bias'].tolist()
+  mlp_params['1_bias'] = vars[4]['params']['Dense_1']['bias'].tolist()
+  mlp_params['2_bias'] = vars[4]['params']['Dense_2']['bias'].tolist()
+  mlp_params['obj_num'] = obj_num
 
-#%% --------------------------------------------------------------------------------
-# ## Run test-set evaluation
-#%%
-# gc.collect()
-
-# render_poses = data['test']['c2w'][:len(data['test']['images'])]
-# frames = []
-# framemasks = []
-# for pruned in pruned_to_eval:
-#   test_iter = tqdm(render_poses)
-#   psnr_module = AverageMeter()
-#   ssim_module = AverageMeter()
-#   for i, p in enumerate(test_iter):
-#     out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
-#     frames.append(out[0])
-#     framemasks.append(out[1])
-
-#     # PSNR
-#     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
-#     psnr_module.update(float(psnr))
-    
-#     # SSIM
-#     ssim = ssim_fn(out[0], data['test']['images'][i])
-#     ssim_module.update(float(ssim))
-
-#     # display
-#     test_iter.set_description(
-#       f"Test I:{i}. Prune:{pruned}. "
-#       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
-#       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
+  scene_params_path = obj_save_dir+f'/mlp.{mlp_prec}.json'
+  with open(scene_params_path, 'wb') as f:
+    f.write(json.dumps(mlp_params).encode('utf-8'))
