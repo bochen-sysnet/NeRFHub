@@ -40,11 +40,6 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
 
-phase1 = False
-phase2 = False
-
-print(jax.local_devices())
-
 weights_dir = prefix + "weights"
 samples_dir = prefix + "samples"
 if not os.path.exists(weights_dir):
@@ -1466,7 +1461,9 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 #%% --------------------------------------------------------------------------------
 # ## Load weights
 #%%
-
+import lpips
+# Initialize the LPIPS metric
+loss_fn_alex = lpips.LPIPS(net='alex')
 
 obj_save_dir = prefix + "obj"
 if not os.path.exists(obj_save_dir):
@@ -1482,20 +1479,44 @@ traindata_p = flax.jax_utils.replicate(data['train'])
 
 test_batch_size = 256*n_device
 
-for mlp_prec in range(1,5):
+# make this empty if not test this
+for mlp_prec in range(1,9):
   print('Finetune for bitrates:', mlp_prec)
   vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
   model_vars = vars
 
-  # rays = camera_ray_batch(
-  #   data['test']['c2w'][selected_test_index], data['test']['hwf'])
-  # gt = data['test']['images'][selected_test_index]
-  # out = render_loop(rays, model_vars, test_batch_size, 80, mlp_prec)
-  # rgb_b = out[0]
-  # acc_b = out[1]
-  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_rgb_binarized.png",rgb_b)
-  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_gt.png",gt)
-  # write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(0)+"_acc_binarized.png",acc_b)
+  # ## Run test-set evaluation to get initial performance
+  #%%
+  gc.collect()
+
+  test_iter = tqdm(data['test']['c2w'][:len(data['test']['images'])])
+  psnr_module = AverageMeter()
+  ssim_module = AverageMeter()
+  lpips_module = AverageMeter()
+  for i, p in enumerate(test_iter):
+    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, 0, mlp_prec)
+
+    # PSNR
+    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+    psnr_module.update(float(psnr))
+    
+    # SSIM
+    ssim = ssim_fn(out[0], data['test']['images'][i])
+    ssim_module.update(float(ssim))
+
+    # Calculate the LPIPS metric
+    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    lpips_module.update(float(lpips_value))
+
+    # display
+    test_iter.set_description(
+      f"Test I:{i}. Prune:{pruned}. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
+      f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
+  with open(samples_dir+"/"+"multi_rate.log",'a+') as f:
+    f.write(f"{mlp_prec},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")
+  # -------------------
 
   state = optimizer.init(model_vars)
   state = flax.jax_utils.replicate(state)
@@ -1508,9 +1529,9 @@ for mlp_prec in range(1,5):
   iters_test = []
   psnr_module = AverageMeter()
 
-  training_iters = 300000
+  training_iters = 400000
   train_psnr_max = 0.0
-  train_iter = tqdm(range(0, training_iters + 1))
+  train_iter = tqdm(range(1, training_iters + 1))
   for i in train_iter:
     t = time.time()
 
@@ -1558,16 +1579,16 @@ for mlp_prec in range(1,5):
     if (i % 10000 == 0):
       this_train_psnr = np.mean(np.array(psnrs[-5000:]))
 
-      if onn and i>100000 and this_train_psnr<=train_psnr_max-0.001:
+      if i>100000 and this_train_psnr<=train_psnr_max-0.001:
         break
-
+      train_psnr_max = max(this_train_psnr,train_psnr_max)
       gc.collect()
       vars = flax.jax_utils.unreplicate(model_vars)
 
       rays = camera_ray_batch(
           data['test']['c2w'][selected_test_index], data['test']['hwf'])
       gt = data['test']['images'][selected_test_index]
-      pruned = 80
+      pruned = 0
       out = render_loop(rays, vars, test_batch_size, pruned, mlp_prec)
       rgb_b = out[0]
       acc_b = out[1]
@@ -1583,11 +1604,9 @@ for mlp_prec in range(1,5):
       p = np.array(psnrs)
       plt.ylim(np.min(p) - .5, np.max(p) + .5)
       plt.legend()
-      plt.savefig(samples_dir+f"/s4_{mlp_prec}__"+str(i)+"_loss.png")
+      plt.savefig(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_loss.png")
 
-      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_rgb_binarized.png",rgb_b)
-      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_gt.png",gt)
-      write_floatpoint_image(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_acc_binarized.png",acc_b)
+      write_floatpoint_image(samples_dir+f"/s4_B{mlp_prec}_"+str(i)+"_rgb_binarized.png",rgb_b)
 
   #%%
   #export weights for the MLP
@@ -1604,3 +1623,97 @@ for mlp_prec in range(1,5):
   scene_params_path = obj_save_dir+f'/mlp.{mlp_prec}.json'
   with open(scene_params_path, 'wb') as f:
     f.write(json.dumps(mlp_params).encode('utf-8'))
+
+  
+  #%% --------------------------------------------------------------------------------
+  # ## Run test-set evaluation
+  #%%
+  gc.collect()
+
+  test_iter = tqdm(data['test']['c2w'][:len(data['test']['images'])])
+  psnr_module = AverageMeter()
+  ssim_module = AverageMeter()
+  lpips_module = AverageMeter()
+  for i, p in enumerate(test_iter):
+    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, 0, mlp_prec)
+
+    # PSNR
+    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+    psnr_module.update(float(psnr))
+    
+    # SSIM
+    ssim = ssim_fn(out[0], data['test']['images'][i])
+    ssim_module.update(float(ssim))
+
+    # Calculate the LPIPS metric
+    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    lpips_module.update(float(lpips_value))
+
+    # display
+    test_iter.set_description(
+      f"Test I:{i}. BW:{mlp_prec}. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
+      f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
+  with open(samples_dir+"/"+"multi_rate.log",'a+') as f:
+    f.write(f"{mlp_prec},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")
+
+
+
+# 96,48,16,8,4
+for pruned in [0,48,80,88,92,-1]:
+  if pruned >= 0:
+    print('Test for pruned channels:', pruned)
+    vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
+  else:
+    # check out the baseline model
+    weights_dir = f'{object_name}_C{16}_P{0}_weights'
+    vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
+
+
+  # sample image
+  rays = camera_ray_batch(data['test']['c2w'][selected_test_index], data['test']['hwf'])
+  gt = data['test']['images'][selected_test_index]
+  if pruned >= 0:
+    out = render_loop(rays, vars, test_batch_size, pruned)
+  else:
+    out = render_loop(rays, vars, test_batch_size, 0)
+  rgb_b = out[0]
+  acc_b = out[1]
+  psnrs_b_test.append(-10 * np.log10(np.mean(np.square(rgb_b - gt))))
+  iters_test.append(i)
+
+
+  write_floatpoint_image(samples_dir+f"/s4_C{pruned}_"+str(i)+"_rgb_binarized.png",rgb_b)
+  gc.collect()
+
+  test_iter = tqdm(data['test']['c2w'][:len(data['test']['images'])])
+  psnr_module = AverageMeter()
+  ssim_module = AverageMeter()
+  lpips_module = AverageMeter()
+  for i, p in enumerate(test_iter):
+    if pruned >= 0:
+      out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
+    else:
+      out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, 0)
+
+    # PSNR
+    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+    psnr_module.update(float(psnr))
+    
+    # SSIM
+    ssim = ssim_fn(out[0], data['test']['images'][i])
+    ssim_module.update(float(ssim))
+
+    # Calculate the LPIPS metric
+    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    lpips_module.update(float(lpips_value))
+
+    # display
+    test_iter.set_description(
+      f"Test I:{i}. Prune:{pruned}. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
+      f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
+  with open(samples_dir+"/"+"multi_channel.log",'a+') as f:
+    f.write(f"{pruned},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")

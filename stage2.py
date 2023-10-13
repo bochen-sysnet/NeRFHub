@@ -1984,7 +1984,7 @@ if phase2:
   pickle.dump(vars, open(weights_dir+"/"+"weights_stage2_1.pkl", "wb"))
 
 #%% --------------------------------------------------------------------------------
-# ## Run test-set evaluation
+## Run test-set evaluation
 #%%
 # gc.collect()
 

@@ -12,14 +12,22 @@
   <select id="3dscene"style="display: inline-block; float: right; font-size: 40px;">
     <option value="select1">None</option>
     <option value="chair96">Chair-96</option>
-    <option value="chair964">Chair-96-4bit</option>
-    <option value="drums">drums</option>
-    <option value="horns">Horns</option>
-    <option value="trex">Trex</option>
-    <option value="flower">Flower</option>
-    <option value="fern">Fern</option>
-    <option value="trex128">Trex-128</option>
     <option value="chair">Chair</option>
+    <option value="drums">Drums</option>
+    <option value="ficus">Ficus</option>
+    <option value="hotdog">Hotdog</option>
+    <option value="lego">Lego</option>
+    <option value="material">Material</option>
+    <option value="mic">Mic</option>
+    <option value="ship">Ship</option>
+    <option value="fern">Fern</option>
+    <option value="flower">Flower</option>
+    <option value="fortress">Fortress</option>
+    <option value="horns">Horns</option>
+    <option value="leaves">Leaves</option>
+    <option value="orchids">Orchids</option>
+    <option value="room">Room</option>
+    <option value="trex">Trex</option>
   </select>
 </div>
 
@@ -653,9 +661,22 @@ const viewDependenceNetworkShaderFunctions_ff = `
   
   // init();
 
-  var manager = new THREE.LoadingManager();
+  var message = "";
+  
+  // Instantiate a dracoloader
+  const dracoloader = new DRACOLoader();
 
-  function init() {
+  // Specify path to a folder containing WASM/JS decoding libraries.
+  dracoloader.setDecoderPath( 'https://www.gstatic.com/draco/versioned/decoders/1.5.6/' );
+
+  // Optional: Pre-fetch Draco WASM/JS module.
+  dracoloader.preload();
+
+  // keep objects to release
+  // let previousObject = null;
+  // let previousObjects = [];
+
+  function init(animation=true) {
     let obj_name = document.getElementById("3dscene").value
     // range
     let mlp_type = document.getElementById("mlp_slider").value
@@ -709,7 +730,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
         2 * object_rescale,
         6 * object_rescale
       );
-      // camera.position.x = -3.0 * object_rescale;
       camera.position.y = 2.0 * object_rescale;
       camera.position.z = 3.464 * object_rescale;
     }else{
@@ -740,7 +760,76 @@ const viewDependenceNetworkShaderFunctions_ff = `
         return response.json();
       })
       .then((json) => {
+        var totalLoaders = json["obj_num"] * 3;
+        var finishedLoaders = 0;
+        function loaderComplete(name) {
+          finishedLoaders++;
+          if (false == animation && finishedLoaders === totalLoaders) {
+            setTimeout(function() {}, 1000); // 1000 milliseconds = 1 second
+            var formData = new FormData();
+            var promises = [];
+            formData.append('prefix', message['prefix']);
+            for (let i = 0; i < message['transform_matrix'].length; i++) {
+              let m = message['transform_matrix'][i];
+              var matrix = new THREE.Matrix4().set(m[0],m[1],m[2],m[3],
+                                                  m[4],m[5],m[6],m[7],
+                                                  m[8],m[9],m[10],m[11],
+                                                  m[12],m[13],m[14],m[15]);
+              var decomposition = decomposeMatrix(matrix);
+              if (isSynthetic){
+                camera.position.set(decomposition.translation.x*object_rescale,
+                                    decomposition.translation.z*object_rescale,
+                                    -decomposition.translation.y*object_rescale,);
+              }else{
+                camera.position.set(decomposition.translation.x*object_rescale,
+                                    decomposition.translation.z*object_rescale,
+                                    1 * object_rescale -decomposition.translation.y*object_rescale,);
+                console.log(camera.position)
+              }
+              camera.rotation.set(decomposition.rotation);
+              controls.update();
+
+              // render scene into target
+              renderer.setRenderTarget(renderTarget);
+              renderer.render(scene, camera);
+
+              // render post FX
+              renderer.setRenderTarget(null);
+              renderer.render(postScene, postCamera);
+
+              // save data from one config
+              var promise = new Promise(function(resolve) {
+                  renderer.domElement.toBlob(function(blob) {
+                      formData.append('images', blob, '${i}.png');
+                      resolve();
+                  }, 'image/png', 1.0);
+              });
+
+              promises.push(promise);
+            }
+            Promise.all(promises).then(function() {
+              var xhr = new XMLHttpRequest();
+              xhr.open('POST', '/save_images');
+              xhr.onload = function() {
+                  if (xhr.status === 200) {
+                      console.log('Rendering completed.',message['mlp'],message['tex'],message['mesh']);
+                  } else {
+                      console.error('Error saving images:', xhr.statusText);
+                  }
+                  location.reload();
+              };
+              xhr.send(formData);
+            });
+            
+            // // Remove the previous object from the scene
+            // if (previousObject) {
+            //   scene.remove(previousObject);
+            // }
+          }
+        }
         for (let i = 0, il = json["obj_num"]; i < il; i++) {
+          // Assuming your texture URL is stored in a variable called textureUrl
+          var uniqueParam = '?nocache=' + Math.random(); // Generate a random parameter
           // the feature tex can be changed 
           if (tex_type == 'png'){
             var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.png";
@@ -750,18 +839,20 @@ const viewDependenceNetworkShaderFunctions_ff = `
             var feat0name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat0.x.png";
             var feat1name = obj_name + "_phone/shape" + i.toFixed(0) + ".png" + "feat1.x.png";
           }
-          let tex0 = new THREE.TextureLoader(manager).load(
-            feat0name,
+          let tex0 = new THREE.TextureLoader().load(
+            feat0name + uniqueParam,
             function (texture) {
               render();
+              loaderComplete(feat0name);
             }
           );
           tex0.magFilter = THREE.NearestFilter;
           tex0.minFilter = THREE.NearestFilter;
-          let tex1 = new THREE.TextureLoader(manager).load(
-            feat1name,
+          let tex1 = new THREE.TextureLoader().load(
+            feat1name + uniqueParam,
             function (texture) {
               render();
+              loaderComplete(feat1name);
             }
           );
           tex1.magFilter = THREE.NearestFilter;
@@ -779,18 +870,9 @@ const viewDependenceNetworkShaderFunctions_ff = `
 
           if (mesh_type == "drc")
           {
-            // Instantiate a loader
-            const loader = new DRACOLoader(manager);
-
-            // Specify path to a folder containing WASM/JS decoding libraries.
-            loader.setDecoderPath( 'https://www.gstatic.com/draco/versioned/decoders/1.5.6/' );
-
-            // Optional: Pre-fetch Draco WASM/JS module.
-            loader.preload();
-
             // Load a Draco geometry
-            loader.load(
-              obj_name + "_phone/shape" + i.toFixed(0) + ".drc",
+            let drc = dracoloader.load(
+              obj_name + "_phone/shape" + i.toFixed(0) + ".drc" + uniqueParam,
               // called when the resource is loaded
               function ( geometry ) {
                 var material = new THREE.MeshStandardMaterial( { vertexColors: THREE.VertexColors } );
@@ -806,13 +888,20 @@ const viewDependenceNetworkShaderFunctions_ff = `
                 if (!isSynthetic){
                   object.position.z = 1 * object_rescale;
                 }
+
                 scene.add(object);
+
+                // Set the newly loaded object as the previous object for the next iteration
+                // previousObject = object;
+                
+                loaderComplete('drc'+ i.toFixed(0));
               }
-            );}
+            );
+          }
           else
           {
-            new OBJLoader(manager).load(
-              obj_name + "_phone/shape" + i.toFixed(0) + ".obj",
+            let obj = new OBJLoader().load(
+              obj_name + "_phone/shape" + i.toFixed(0) + ".obj" + uniqueParam,
               function (object) {
                 object.traverse(function (child) {
                   if (child.type == "Mesh") {
@@ -826,6 +915,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
                   object.position.z = 1 * object_rescale;
                 }
                 scene.add(object);
+                loaderComplete('obj'+ i.toFixed(0));
               }
             );
           }
@@ -873,7 +963,10 @@ const viewDependenceNetworkShaderFunctions_ff = `
 
         window.addEventListener("resize", onWindowResize, false);
 
-        animate();
+        if (animation)
+        {
+          animate();
+        }
       });
   }
 
@@ -899,6 +992,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     oldMilliseconds = smoothMilliseconds;
     document.getElementById("fpsdisplay").innerHTML =
       "FPS: " + smoothFps.toFixed(1);
+    // trigger mlp if needed
   }
 
   function animate() {
@@ -924,15 +1018,24 @@ const viewDependenceNetworkShaderFunctions_ff = `
     updateFPSCounter();
   }
 
+  function decomposeMatrix(matrix) {
+    // Extract translation
+    var translation = new THREE.Vector3();
+    translation.setFromMatrixPosition(matrix);
+
+    // Extract rotation
+    var rotation = new THREE.Quaternion();
+    var scale = new THREE.Vector3();
+    matrix.decompose(translation, rotation, scale);
+
+    return {
+      translation: translation,
+      rotation: rotation,
+      scale: scale
+    };
+  }
+
   function snapshot() {
-    var azimuthalAngle = Math.random() * Math.PI * 2; // Random angle between 0 and 2π
-    var polarAngle = Math.random() * Math.PI - Math.PI / 2; // Random angle between -π/2 and π/2
-
-    // Calculate new camera position based on spherical coordinates
-    var radius = camera.position.length();
-    camera.position.setFromSphericalCoords(radius, polarAngle, azimuthalAngle);
-    controls.update();
-
     // render scene into target
     renderer.setRenderTarget(renderTarget);
     renderer.render(scene, camera);
@@ -952,8 +1055,10 @@ const viewDependenceNetworkShaderFunctions_ff = `
   
   var socket = io.connect('http://' + document.domain + ':' + location.port);
 
-  socket.on('message_to_html', function(message) {
+  socket.on('message_to_html', function(msg) {
+    console.log('Receive message:',msg);
     // set to correct parameter
+    message = msg;
     // scene
     let selectedOption = message['scene_option']
     document.getElementById("3dscene").value = selectedOption;
@@ -963,9 +1068,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     document.getElementById("texture").value = message['tex'];
     // mesh
     document.getElementById("mesh").value = message['mesh'];
-    // test or groundtruth
-    let prefix = message['prefix']
-
+    
     isSynthetic = synthericList.includes(selectedOption.replace(/\d+/g, ''));
     if (isSynthetic){
       preset_size_w = 800;
@@ -974,53 +1077,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
       preset_size_w = 1008;
       preset_size_h = 756;
     }
-    // init
-    manager.onLoad = function () {
-      var formData = new FormData();
-      formData.append('prefix', prefix);
-      var promises = [];
-      for (let i = 0; i < message['num_samples']; i++) {
-        
-        var azimuthalAngle = message['azimuthal_angle'][i]; // Random angle between 0 and 2π
-        var polarAngle = message['polar_angle'][i]; // Random angle between -π/2 and π/2
-
-        // Calculate new camera position based on spherical coordinates
-        var radius = camera.position.length();
-        camera.position.setFromSphericalCoords(radius, polarAngle, azimuthalAngle);
-        controls.update();
-
-        // render scene into target
-        renderer.setRenderTarget(renderTarget);
-        renderer.render(scene, camera);
-
-        // render post FX
-        renderer.setRenderTarget(null);
-        renderer.render(postScene, postCamera);
-
-        // save data from one config
-        var promise = new Promise(function(resolve) {
-            renderer.domElement.toBlob(function(blob) {
-                formData.append('images', blob, '${i}.png');
-                resolve();
-            }, 'image/png', 1.0);
-        });
-
-        promises.push(promise);
-      }
-      Promise.all(promises).then(function() {
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', '/save_images');
-        xhr.onload = function() {
-            if (xhr.status === 200) {
-                console.log('Request completed:',message);
-            } else {
-                console.error('Error saving images:', xhr.statusText);
-            }
-        };
-        xhr.send(formData);
-    });
-      
-    }
-    init();
+    init(false);
   });
 </script>

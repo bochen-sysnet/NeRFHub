@@ -26,7 +26,7 @@ def save_images():
         images = request.files.getlist('images')
         prefix = request.form['prefix']
         for i, image_data in enumerate(images):
-            image_data.save(f'profiling/{prefix}_{i+1}.png')
+            image_data.save(f'profiling/{prefix}{i+1}.png')
     except Exception as e:
         return str(e), 500
     
@@ -46,16 +46,6 @@ directory_path = './'
 @app.route('/<path:filename>')
 def serve_file(filename):
     return send_from_directory(directory_path, filename)
-
-@app.route('/profile_request', methods=['POST'])
-def process_request():
-    data = request.json  # Assuming the request contains JSON data
-
-    # Access the array
-    received_array = data.get('dataArray')
-
-    return jsonify({"result": "Next configuration"})
-
 
 def prune(object_name, prune_chan, d):
     # the number of prunable layers is hard-coded to 2 in MobileNeRF

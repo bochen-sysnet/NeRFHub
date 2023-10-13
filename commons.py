@@ -8,7 +8,7 @@ import copy
 
 
 # whether train multiple mlp
-onn = True
+onn = False
 
 # test at epoch 0
 zero_test = False
@@ -41,7 +41,7 @@ else:
 
 
 scene_type = "synthetic"
-object_name = "chair"
+object_name = "mic"
 scene_dir = "../dataset/nerf_synthetic/"+object_name
 prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
