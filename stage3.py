@@ -36,7 +36,18 @@ import time
 import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
-from jax.experimental.host_callback import call
+
+import argparse
+parser = argparse.ArgumentParser(description='MobileNeRF Training')
+
+parser.add_argument('--object', default="chair", type=str, 
+                    help='Object name to train')
+args = parser.parse_args()
+
+object_name = args.object
+scene_type = scene2type(object_name)
+scene_dir = scene2root(object_name) + object_name
+prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
 print(jax.local_devices())
 
@@ -124,6 +135,7 @@ if scene_type=="synthetic":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
 elif scene_type=="forwardfacing" or scene_type=="real360":
 
@@ -293,6 +305,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
   bg_color = jnp.mean(images)
 
@@ -603,6 +616,10 @@ model_vars = vars
 #%% --------------------------------------------------------------------------------
 # ## Get mesh
 #%%
+
+# init time
+t_init = time.time()
+t_total = 0.0
 
 #%%
 #extract mesh vertices
@@ -2207,44 +2224,45 @@ for i in range(out_cell_num):
     num_visible_quads += 1
 
 print("Number of quad faces:", num_visible_quads)
+t_total += time.time() - t_init
 
 #%% --------------------------------------------------------------------------------
 # ## Eval
 #%%
-gc.collect()
+# gc.collect()
 
 
-render_poses = data['test']['c2w'][:len(data['test']['images'])]
-frames = []
-framemasks = []
-for pruned in pruned_to_eval:
-  test_iter = tqdm(render_poses)
-  psnr_module = AverageMeter()
-  ssim_module = AverageMeter()
-  for i, p in enumerate(test_iter):
-    out = render_loop(camera_ray_batch(p, hwf), vars, point_UV_grid, texture_alpha, texture_features, test_batch_size, prune_chan=pruned)
-    frames.append(out[0])
-    framemasks.append(out[1])
+# render_poses = data['test']['c2w'][:len(data['test']['images'])]
+# frames = []
+# framemasks = []
+# for pruned in pruned_to_eval:
+#   test_iter = tqdm(render_poses)
+#   psnr_module = AverageMeter()
+#   ssim_module = AverageMeter()
+#   for i, p in enumerate(test_iter):
+#     out = render_loop(camera_ray_batch(p, hwf), vars, point_UV_grid, texture_alpha, texture_features, test_batch_size, prune_chan=pruned)
+#     frames.append(out[0])
+#     framemasks.append(out[1])
 
-    # PSNR
-    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
-    psnr_module.update(float(psnr))
+#     # PSNR
+#     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+#     psnr_module.update(float(psnr))
     
-    # SSIM
-    ssim = ssim_fn(out[0], data['test']['images'][i])
-    ssim_module.update(float(ssim))
+#     # SSIM
+#     ssim = ssim_fn(out[0], data['test']['images'][i])
+#     ssim_module.update(float(ssim))
 
-    # display
-    test_iter.set_description(
-      f"{prefix} Test I:{i}. Prune:{pruned}. "
-      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
-      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
+#     # display
+#     test_iter.set_description(
+#       f"{prefix} Test I:{i}. Prune:{pruned}. "
+#       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+#       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
 #%% --------------------------------------------------------------------------------
 # ## Write mesh
 #%%
 
 #use texture_mask to decide keep or drop
-
+t_init = time.time()
 new_img_sizes = [
   [1024,1024],
   [2048,1024],
@@ -2520,8 +2538,13 @@ fout.close()
 # # Save images for testing
 #%%
 
-pred_frames = np.array(frames,data_type)
-gt_frames = np.array(data['test']['images'],data_type)
+# pred_frames = np.array(frames,data_type)
+# gt_frames = np.array(data['test']['images'],data_type)
 
-pickle.dump(pred_frames, open(weights_dir+"/"+"/pred_frames.pkl", "wb"))
-pickle.dump(gt_frames, open(weights_dir+"/"+"gt_frames.pkl", "wb"))
+# pickle.dump(pred_frames, open(weights_dir+"/"+"/pred_frames.pkl", "wb"))
+# pickle.dump(gt_frames, open(weights_dir+"/"+"gt_frames.pkl", "wb"))
+
+t_total += time.time() - t_init
+print('Total elapsed time:',t_total)
+with open(weights_dir+"/training.log",'a+') as f:
+  f.write(f'Stage3:{t_total}\n')

@@ -8,14 +8,13 @@ import copy
 
 
 # whether train multiple mlp
-onn = False
+onn = True
 
 # test at epoch 0
 zero_test = False
 
 # starting step
 step_init = 1
-# step_init = 800001
 
 # model config
 num_bottleneck_features = 8
@@ -32,18 +31,13 @@ if not onn:
   def phase2pruned_channel(phase):
      return 0
 else:
-  channel_width,total_phases,pruned_to_eval = 96,24,[80]
-  total_steps = 800000
-  step_per_phase = total_steps//total_phases
+  step_per_phase = 100000
+  # channel_width,total_phases,pruned_to_eval = 96,8,[80]
+  # def phase2pruned_channel(phase):
+  #   return np.array([16 * phase, 80]).min()
+  channel_width,total_phases,pruned_to_eval = 64,5,[48]
   def phase2pruned_channel(phase):
-    return (channel_width//total_phases) * phase
-
-
-
-scene_type = "synthetic"
-object_name = "mic"
-scene_dir = "../dataset/nerf_synthetic/"+object_name
-prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
+    return np.array([16 * phase, 48]).min()
 
 # synthetic
 # nerf_synthetic
@@ -56,7 +50,23 @@ prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 # real360
 # bicycle flowerbed gardenvase stump treehill
 # fulllivingroom kitchencounter kitchenlego officebonsai
+def scene2type(target_name):
+    synthetic_list = ['chair', 'drums', 'ficus', 'hotdog', 'lego', 'materials', 'mic', 'ship']
+    scene_type = 'forwardfacing'
+    for scene in synthetic_list:
+        if scene in target_name:
+            scene_type = 'synthetic'
+            break
+    return scene_type
 
+def scene2root(target_name):
+    synthetic_list = ['chair', 'drums', 'ficus', 'hotdog', 'lego', 'materials', 'mic', 'ship']
+    root_dir='../dataset/nerf_llff_data/'
+    for scene in synthetic_list:
+        if scene in target_name:
+            root_dir = "../dataset/nerf_synthetic/"
+            break
+    return root_dir
 
 class AverageMeter(object):
   """Computes and stores the average and current value"""

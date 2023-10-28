@@ -37,11 +37,19 @@ import time
 import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
+import argparse
+parser = argparse.ArgumentParser(description='MobileNeRF Training')
+
+parser.add_argument('--object', default="chair", type=str, 
+                    help='Object name to train')
+args = parser.parse_args()
+
+object_name = args.object
+scene_type = scene2type(object_name)
+scene_dir = scene2root(object_name) + object_name
+prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
 print(jax.local_devices())
-# if len(jax.local_devices())!=8:
-#   print("ERROR: need 8 v100 GPUs")
-#   1/0
 
 weights_dir = prefix + "weights"
 samples_dir = prefix + "samples"
@@ -1265,7 +1273,7 @@ model_vars = [point_grid, acc_grid,
               ]
 
 if step_init>1 and (step_init-1)%10000==0:
-  vars = pickle.load(open(weights_dir+"/"+f"s1_tmp_state{step_init-1}.pkl", "rb"))
+  vars = pickle.load(open(weights_dir+"/"+f"s1_ckpt.pkl", "rb"))
   model_vars = vars
 
 #avoid bugs
@@ -1541,7 +1549,14 @@ for i in train_iter:
     batch_size = test_batch_size
     keep_num = test_keep_num
     threshold = test_threshold
-    train_phase = max(0, (i-1-training_iters)//step_per_phase)
+    if i<=training_iters:
+      train_phase = 0
+    else:
+      # 1+training_iters ---- training_iters + (total_phases - 1) * step_per_phase
+      # 0 ----(total_phases - 1) * step_per_phase -1 
+      # 0 ---- 400000-1
+      # 1 ---- 4
+      train_phase = 1 + (i-1-training_iters)//step_per_phase
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
@@ -1617,6 +1632,7 @@ for i in train_iter:
     plt.ylim(np.min(p) - .5, np.max(p) + .5)
     plt.legend()
     plt.savefig(samples_dir+"/s1_"+str(i)+"_loss.png")
+    plt.close()
 
     write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_rgb.png",rgb)
     write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_rgb_binarized.png",rgb_b)
@@ -1628,38 +1644,40 @@ for i in train_iter:
 #%% --------------------------------------------------------------------------------
 # ## Run test-set evaluation
 #%%
-gc.collect()
+# gc.collect()
 
 #%%
 
-render_poses = data['test']['c2w'][:len(data['test']['images'])]
-frames = []
-framemasks = []
-for pruned in pruned_to_eval:
-  test_iter = tqdm(render_poses)
-  psnr_module = AverageMeter()
-  ssim_module = AverageMeter()
-  for i, p in enumerate(test_iter):
-    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
-    frames.append(out[0])
-    framemasks.append(out[1])
+# render_poses = data['test']['c2w'][:len(data['test']['images'])]
+# frames = []
+# framemasks = []
+# for pruned in pruned_to_eval:
+#   test_iter = tqdm(render_poses)
+#   psnr_module = AverageMeter()
+#   ssim_module = AverageMeter()
+#   for i, p in enumerate(test_iter):
+#     out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
+#     frames.append(out[0])
+#     framemasks.append(out[1])
 
-    # PSNR
-    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
-    psnr_module.update(float(psnr))
+#     # PSNR
+#     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+#     psnr_module.update(float(psnr))
     
-    # SSIM
-    ssim = ssim_fn(out[0], data['test']['images'][i])
-    ssim_module.update(float(ssim))
+#     # SSIM
+#     ssim = ssim_fn(out[0], data['test']['images'][i])
+#     ssim_module.update(float(ssim))
 
-    # display
-    test_iter.set_description(
-      f"Test I:{i}. Prune:{pruned}. "
-      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
-      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
+#     # display
+#     test_iter.set_description(
+#       f"Test I:{i}. Prune:{pruned}. "
+#       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+#       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). ")
     
 #%%
 #%% --------------------------------------------------------------------------------
 # ## Save weights
 #%%
 pickle.dump(vars, open(weights_dir+"/"+"weights_stage1.pkl", "wb"))
+with open(weights_dir+"/training.log",'a+') as f:
+  f.write(f'Stage1:{t_total}\n')

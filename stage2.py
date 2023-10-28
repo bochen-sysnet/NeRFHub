@@ -40,6 +40,18 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
 
+import argparse
+parser = argparse.ArgumentParser(description='MobileNeRF Training')
+
+parser.add_argument('--object', default="chair", type=str, 
+                    help='Object name to train')
+args = parser.parse_args()
+
+object_name = args.object
+scene_type = scene2type(object_name)
+scene_dir = scene2root(object_name) + object_name
+prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
+
 phase1 = True
 phase2 = True
 
@@ -126,6 +138,7 @@ if scene_type=="synthetic":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
 elif scene_type=="forwardfacing" or scene_type=="real360":
 
@@ -295,6 +308,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
   bg_color = jnp.mean(images)
 
@@ -1622,7 +1636,7 @@ if phase1:
           data['test']['c2w'][selected_test_index], data['test']['hwf'])
       gt = data['test']['images'][selected_test_index]
       if onn:
-        pruned = 80
+        pruned = 48
         print(" Pruned:",pruned, end=',')
       else:
         pruned = 0
@@ -1646,6 +1660,7 @@ if phase1:
       plt.ylim(np.min(p) - .5, np.max(p) + .5)
       plt.legend()
       plt.savefig(samples_dir+"/s2_0_"+str(i)+"_loss.png")
+      plt.close()
 
       write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_rgb.png",rgb)
       write_floatpoint_image(samples_dir+"/s2_0_"+str(i)+"_rgb_binarized.png",rgb_b)
@@ -1658,6 +1673,8 @@ if phase1:
   # ## Save weights
   #%%
   pickle.dump(vars, open(weights_dir+"/"+"weights_stage2_0.pkl", "wb"))
+  with open(weights_dir+"/training.log",'a+') as f:
+    f.write(f'Stage2_1:{t_total}\n')
 
 #%%
 #%% --------------------------------------------------------------------------------
@@ -1952,7 +1969,7 @@ if phase2:
           data['test']['c2w'][selected_test_index], data['test']['hwf'])
       gt = data['test']['images'][selected_test_index]
       if onn:
-        pruned = 80
+        pruned = 48
         print(" Pruned:",pruned, end=',')
       else:
         pruned = 0
@@ -1972,6 +1989,7 @@ if phase2:
       plt.ylim(np.min(p) - .5, np.max(p) + .5)
       plt.legend()
       plt.savefig(samples_dir+"/s2_1_"+str(i)+"_loss.png")
+      plt.close()
 
       write_floatpoint_image(samples_dir+"/s2_1_"+str(i)+"_rgb_binarized.png",rgb_b)
       write_floatpoint_image(samples_dir+"/s2_1_"+str(i)+"_gt.png",gt)
@@ -1982,6 +2000,8 @@ if phase2:
   # ## Save weights
   #%%
   pickle.dump(vars, open(weights_dir+"/"+"weights_stage2_1.pkl", "wb"))
+  with open(weights_dir+"/training.log",'a+') as f:
+    f.write(f'Stage2_2:{t_total}\n')
 
 #%% --------------------------------------------------------------------------------
 ## Run test-set evaluation
@@ -2003,7 +2023,7 @@ if phase2:
 #     # PSNR
 #     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
 #     psnr_module.update(float(psnr))
-    
+
 #     # SSIM
 #     ssim = ssim_fn(out[0], data['test']['images'][i])
 #     ssim_module.update(float(ssim))

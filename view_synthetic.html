@@ -11,7 +11,6 @@
   <p style="display: inline-block; margin: 0;">3D Scene: </p>
   <select id="3dscene"style="display: inline-block; float: right; font-size: 40px;">
     <option value="select1">None</option>
-    <option value="chair96">Chair-96</option>
     <option value="chair">Chair</option>
     <option value="drums">Drums</option>
     <option value="ficus">Ficus</option>
@@ -28,21 +27,30 @@
     <option value="orchids">Orchids</option>
     <option value="room">Room</option>
     <option value="trex">Trex</option>
+    <option value="chairH">Chair-H</option>
+    <option value="drumsH">Drums-H</option>
+    <option value="ficusH">Ficus-H</option>
+    <option value="hotdogH">Hotdog-H</option>
+    <option value="legoH">Lego-H</option>
+    <option value="materialH">Material-H</option>
+    <option value="micH">Mic-H</option>
+    <option value="shipH">Ship-H</option>
+    <option value="fernH">Fern-H</option>
+    <option value="flowerH">Flower-H</option>
+    <option value="fortressH">Fortress-H</option>
+    <option value="hornsH">Horns-H</option>
+    <option value="leavesH">Leaves-H</option>
+    <option value="orchidsH">Orchids-H</option>
+    <option value="roomH">Room-H</option>
+    <option value="trexH">Trex-H</option>
   </select>
 </div>
 
 <div style="clear: both;"></div>
 
 <div style="display: block; float: right; font-size: 40px;">
-  <p style="display: inline-block; margin: 0;">Quality: <span id="quality_value" style="display: inline-block;"></span></p>
-  <input type="range" id="quality_slider" min="1" max="100" step="1" value="50" class="slider"  style="width: 200px;display: inline-block;">
-</div>
-
-<div style="clear: both;"></div>
-
-<div style="display: block; float: right; font-size: 40px;">
   <p style="display: inline-block; margin: 0;">MLP: <span id="channel_value" style="display: inline-block;"></span></p>
-  <input type="range" id="mlp_slider" min="4" max="96" step="1" value="96" class="slider"  style="width: 200px;display: inline-block;">
+  <input type="range" id="mlp_slider" min="1" max="96" step="1" value="1" class="slider"  style="width: 200px;display: inline-block;">
 </div>
 
 <div style="clear: both;"></div>
@@ -122,6 +130,12 @@
   <button id="snapshot" style="display: block; float: right; font-size: 40px;">Snapshot</button>
 </div>
 
+<div style="clear: both;"></div>
+
+<div style="display: block; float: right; font-size: 40px;">
+  <p style="display: inline-block; margin: 0;">Dev:</p>
+  <button id="scan" style="display: block; float: right; font-size: 40px;">Scan</button>
+</div>
 
 
 
@@ -529,15 +543,24 @@ const viewDependenceNetworkShaderFunctions_ff = `
                       "lego", "materials", "mic", "ship"];
   let selected_scene = document.getElementById("3dscene").value;
 
-  var isSynthetic = false;
-  var preset_size_w = 800, preset_size_h = 1008;
+  var isSynthetic = true;
+  var preset_size_w = 800, preset_size_h = 800;
   const object_rescale = 0.1;
+
+  function containsSubstring(L, S) {
+    for (let i = 0; i < L.length; i++) {
+        if (S.includes(L[i])) {
+            return true;
+        }
+    }
+    return false;
+  }
 
   // Function to handle selection
   var scene_selection = document.getElementById("3dscene");
   scene_selection.onchange = function () {
     var selectedOption = document.getElementById("3dscene").value;
-    isSynthetic = synthericList.includes(selectedOption.replace(/\d+/g, ''));
+    isSynthetic = containsSubstring(synthericList, selectedOption);
     if (selectedOption == 'select1') return;
     if (isSynthetic){
       preset_size_w = 800;
@@ -547,13 +570,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
       preset_size_h = 756;
     }
     init();
-  }
-  
-  var quality_slider = document.getElementById("quality_slider");
-  var quality_output = document.getElementById("quality_value");
-  quality_output.innerHTML = quality_slider.value;
-  quality_slider.oninput = function() {
-    quality_output.innerHTML = this.value;
   }
 
   var mlp_slider = document.getElementById("mlp_slider");
@@ -565,6 +581,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
   mlp_slider.onchange = function() {
     // create a pruned network with POST
     let object_name = document.getElementById("3dscene").value;
+    if (object_name == 'select1') return;
     let bit_depth = document.getElementById("bit_depth").value;
     fetch('http://130.126.139.208:8000/prune_request', {
         method: 'POST',
@@ -658,6 +675,14 @@ const viewDependenceNetworkShaderFunctions_ff = `
     });
   });
 
+  // add Screenshot listener
+  document.getElementById("snapshot").addEventListener('click', snapshot);
+  
+  // add device profiler
+  document.getElementById("scan").addEventListener('click', function () {
+    document.getElementById("3dscene").value = 'chairD';
+    init(true,true);
+  });
   
   // init();
 
@@ -676,7 +701,8 @@ const viewDependenceNetworkShaderFunctions_ff = `
   // let previousObject = null;
   // let previousObjects = [];
 
-  function init(animation=true) {
+  function init(animation=true, scan=false, measure_fps=false) {
+    let loadingStart = window.performance.now();
     let obj_name = document.getElementById("3dscene").value
     // range
     let mlp_type = document.getElementById("mlp_slider").value
@@ -750,9 +776,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
     // added features
     // controls.autoRotate = true
 
-    // add Screenshot listener
-    document.getElementById("snapshot").addEventListener('click', snapshot);
-
     scene = new THREE.Scene();
     
     fetch(JSONFile)
@@ -765,10 +788,17 @@ const viewDependenceNetworkShaderFunctions_ff = `
         function loaderComplete(name) {
           finishedLoaders++;
           if (false == animation && finishedLoaders === totalLoaders) {
+            let loadingComplete = window.performance.now();
+            let loadTime = loadingComplete - loadingStart;
+            let channel_val = document.getElementById("mlp_slider").value;
+            let object_val = document.getElementById("3dscene").value;
             setTimeout(function() {}, 1000); // 1000 milliseconds = 1 second
             var formData = new FormData();
             var promises = [];
             formData.append('prefix', message['prefix']);
+            formData.append('load_time', loadTime);
+            formData.append('channel', channel_val);
+            formData.append('object', object_val);
             for (let i = 0; i < message['transform_matrix'].length; i++) {
               let m = message['transform_matrix'][i];
               var matrix = new THREE.Matrix4().set(m[0],m[1],m[2],m[3],
@@ -784,7 +814,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
                 camera.position.set(decomposition.translation.x*object_rescale,
                                     decomposition.translation.z*object_rescale,
                                     1 * object_rescale -decomposition.translation.y*object_rescale,);
-                console.log(camera.position)
               }
               camera.rotation.set(decomposition.rotation);
               controls.update();
@@ -808,17 +837,40 @@ const viewDependenceNetworkShaderFunctions_ff = `
               promises.push(promise);
             }
             Promise.all(promises).then(function() {
-              var xhr = new XMLHttpRequest();
-              xhr.open('POST', '/save_images');
-              xhr.onload = function() {
-                  if (xhr.status === 200) {
-                      console.log('Rendering completed.',message['mlp'],message['tex'],message['mesh']);
-                  } else {
-                      console.error('Error saving images:', xhr.statusText);
-                  }
-                  location.reload();
-              };
-              xhr.send(formData);
+              // set to true to measure fps
+              if (measure_fps){
+                animate();
+                setTimeout(function() {
+                  let fps_val = document.getElementById("fpsdisplay").innerHTML;
+                  formData.append('fps', fps_val);
+                  var xhr = new XMLHttpRequest();
+                  xhr.open('POST', '/save_results');
+                  xhr.onload = function() {
+                      if (xhr.status === 200) {
+                          console.log('Rendering completed.',message['mlp'],message['tex'],message['mesh']);
+                      } else {
+                          console.error('Error saving results:', xhr.statusText);
+                      }
+                      location.reload();
+                  };
+                  xhr.send(formData);
+
+                }, 5000);
+              }else{
+                formData.append('fps', 0);
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/save_results');
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        console.log('Rendering completed.',message['mlp'],message['tex'],message['mesh']);
+                    } else {
+                        console.error('Error saving results:', xhr.statusText);
+                    }
+                    location.reload();
+                };
+                xhr.send(formData);
+              }
+                
             });
             
             // // Remove the previous object from the scene
@@ -826,6 +878,50 @@ const viewDependenceNetworkShaderFunctions_ff = `
             //   scene.remove(previousObject);
             // }
           }
+          if (true == scan && finishedLoaders === totalLoaders){
+            fetch('http://130.126.139.208:8000/prune_request', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({channel: mlp_slider.value,object_name: document.getElementById("3dscene").value,d: 8})  // Send data to Python server
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log(data);  // Process the response from Python
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+
+            // wait and record time
+            setTimeout(function() {
+              console.log(mlp_output.innerHTML, document.getElementById("fpsdisplay").innerHTML);
+              fetch('http://130.126.139.208:8000/save_fps', {
+                  method: 'POST',
+                  headers: {
+                      'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({fps: mlp_output.innerHTML+' '+document.getElementById("fpsdisplay").innerHTML})  // Send data to Python server
+              })
+              .then(response => response.json())
+              .then(data => {
+              })
+              .catch(error => {
+                  console.error('Error:', error);
+              });
+
+              // update for next
+              if (mlp_slider.value > 1)
+              {
+                mlp_slider.value = mlp_slider.value - 1;
+                mlp_output.innerHTML = mlp_slider.value;
+                init(true,true);
+              }
+
+            }, 5000);
+          }
+          
         }
         for (let i = 0, il = json["obj_num"]; i < il; i++) {
           // Assuming your texture URL is stored in a variable called textureUrl
@@ -990,9 +1086,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     let smoothFps = 1000 / smoothMilliseconds;
     gLastFrame = currentFrame;
     oldMilliseconds = smoothMilliseconds;
-    document.getElementById("fpsdisplay").innerHTML =
-      "FPS: " + smoothFps.toFixed(1);
-    // trigger mlp if needed
+    document.getElementById("fpsdisplay").innerHTML = smoothFps.toFixed(1);
   }
 
   function animate() {
@@ -1069,7 +1163,7 @@ const viewDependenceNetworkShaderFunctions_ff = `
     // mesh
     document.getElementById("mesh").value = message['mesh'];
     
-    isSynthetic = synthericList.includes(selectedOption.replace(/\d+/g, ''));
+    isSynthetic = containsSubstring(synthericList, selectedOption);
     if (isSynthetic){
       preset_size_w = 800;
       preset_size_h = 800;
@@ -1077,6 +1171,6 @@ const viewDependenceNetworkShaderFunctions_ff = `
       preset_size_w = 1008;
       preset_size_h = 756;
     }
-    init(false);
+    init(false,false,message['measure_fps']);
   });
 </script>

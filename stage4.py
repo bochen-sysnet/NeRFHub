@@ -39,6 +39,19 @@ import time
 import matplotlib.pyplot as plt
 from PIL import Image
 from multiprocessing.pool import ThreadPool
+import torch
+
+import argparse
+parser = argparse.ArgumentParser(description='MobileNeRF Training')
+
+parser.add_argument('--object', default="chair", type=str, 
+                    help='Object name to train')
+args = parser.parse_args()
+
+object_name = args.object
+scene_type = scene2type(object_name)
+scene_dir = scene2root(object_name) + object_name
+prefix = f'{object_name}_C{channel_width}_P{total_phases}_'
 
 weights_dir = prefix + "weights"
 samples_dir = prefix + "samples"
@@ -121,6 +134,7 @@ if scene_type=="synthetic":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
 elif scene_type=="forwardfacing" or scene_type=="real360":
 
@@ -290,6 +304,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
     plt.axis('equal')
     plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+    plt.close()
 
   bg_color = jnp.mean(images)
 
@@ -1386,8 +1401,6 @@ render_test_p = jax.pmap(lambda rays, vars, prune_chan, mlp_prec: render_rays(
     rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng, prune_chan, mlp_prec),
     in_axes=(0, None, None, None))
 
-import numpy
-
 def render_test(rays, vars, prune_chan, mlp_prec): ### antialiasing by supersampling
   sh = rays[0].shape
   rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
@@ -1465,9 +1478,8 @@ import lpips
 # Initialize the LPIPS metric
 loss_fn_alex = lpips.LPIPS(net='alex')
 
-obj_save_dir = prefix + "obj"
-if not os.path.exists(obj_save_dir):
-  os.makedirs(obj_save_dir)
+obj_save_dir = prefix + "obj_phone"
+assert os.path.exists(obj_save_dir)
 
 with open(obj_save_dir + '/mlp.json', 'r') as file:
   obj_num = json.load(file)["obj_num"]
@@ -1479,9 +1491,11 @@ traindata_p = flax.jax_utils.replicate(data['train'])
 
 test_batch_size = 256*n_device
 
+# init time
+t_total = 0.0
+
 # make this empty if not test this
-for mlp_prec in range(1,9):
-  print('Finetune for bitrates:', mlp_prec)
+for mlp_prec in range(1,5):
   vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
   model_vars = vars
 
@@ -1505,16 +1519,18 @@ for mlp_prec in range(1,9):
     ssim_module.update(float(ssim))
 
     # Calculate the LPIPS metric
-    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    im1 = torch.tensor(numpy.array(out[0])).unsqueeze(0).permute(0, 3, 1, 2)
+    im2 = torch.tensor(numpy.array(data['test']['images'][i])).unsqueeze(0).permute(0, 3, 1, 2)
+    lpips_value = loss_fn_alex(im1, im2)
     lpips_module.update(float(lpips_value))
 
     # display
     test_iter.set_description(
-      f"Test I:{i}. Prune:{pruned}. "
+      f"Test I:{i}. MLP prec:{mlp_prec}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
       f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
-  with open(samples_dir+"/"+"multi_rate.log",'a+') as f:
+  with open(weights_dir+"/"+"multi_rate.log",'a+') as f:
     f.write(f"{mlp_prec},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")
   # -------------------
 
@@ -1526,14 +1542,13 @@ for mlp_prec in range(1,9):
   psnrs = []
   iters = []
   psnrs_b_test = []
-  iters_test = []
   psnr_module = AverageMeter()
 
   training_iters = 400000
   train_psnr_max = 0.0
   train_iter = tqdm(range(1, training_iters + 1))
   for i in train_iter:
-    t = time.time()
+    t_init = time.time()
 
     batch_size = test_batch_size
     keep_num = test_keep_num
@@ -1563,6 +1578,8 @@ for mlp_prec in range(1,9):
         model_vars,
         mlp_prec
         )
+    
+    t_total += time.time() - t_init
 
     psnrs.append(-10. * np.log10(color_loss_l2[0]))
     iters.append(i)
@@ -1573,10 +1590,13 @@ for mlp_prec in range(1,9):
     # show result
     train_iter.set_description(
         f"{prefix} {mlp_prec} I:{i}. "
-        f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). ")
+        f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+        f"Time:{t_total}")
 
     # Logging
     if (i % 10000 == 0):
+      print('Elapsed training time: %d min %d sec.'
+            % (t_total // 60, int(t_total) % 60), end=',')
       this_train_psnr = np.mean(np.array(psnrs[-5000:]))
 
       if i>100000 and this_train_psnr<=train_psnr_max-0.001:
@@ -1591,20 +1611,9 @@ for mlp_prec in range(1,9):
       pruned = 0
       out = render_loop(rays, vars, test_batch_size, pruned, mlp_prec)
       rgb_b = out[0]
-      acc_b = out[1]
       psnrs_b_test.append(-10 * np.log10(np.mean(np.square(rgb_b - gt))))
-      iters_test.append(i)
 
-      print(" PSNR:",'Training: %0.3f' % this_train_psnr,'Test binary: %0.3f' % psnrs_b_test[-1])
-
-      plt.figure()
-      plt.title(i)
-      plt.plot(iters, psnrs)
-      plt.plot(iters_test, psnrs_b_test)
-      p = np.array(psnrs)
-      plt.ylim(np.min(p) - .5, np.max(p) + .5)
-      plt.legend()
-      plt.savefig(samples_dir+f"/s4_{mlp_prec}_"+str(i)+"_loss.png")
+      print(" PSNR:",'Training: %0.3f' % this_train_psnr,'Test binary: %0.3f' % psnrs_b_test[-1],)
 
       write_floatpoint_image(samples_dir+f"/s4_B{mlp_prec}_"+str(i)+"_rgb_binarized.png",rgb_b)
 
@@ -1646,7 +1655,9 @@ for mlp_prec in range(1,9):
     ssim_module.update(float(ssim))
 
     # Calculate the LPIPS metric
-    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    im1 = torch.tensor(numpy.array(out[0])).unsqueeze(0).permute(0, 3, 1, 2)
+    im2 = torch.tensor(numpy.array(data['test']['images'][i])).unsqueeze(0).permute(0, 3, 1, 2)
+    lpips_value = loss_fn_alex(im1, im2)
     lpips_module.update(float(lpips_value))
 
     # display
@@ -1655,36 +1666,32 @@ for mlp_prec in range(1,9):
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
       f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
-  with open(samples_dir+"/"+"multi_rate.log",'a+') as f:
+  with open(weights_dir+"/"+"multi_rate.log",'a+') as f:
     f.write(f"{mlp_prec},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")
 
+print('Total elapsed time:',t_total)
+with open(weights_dir+"/training.log",'a+') as f:
+  f.write(f'Stage4:{t_total}\n')
 
-
-# 96,48,16,8,4
-for pruned in [0,48,80,88,92,-1]:
-  if pruned >= 0:
-    print('Test for pruned channels:', pruned)
-    vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
-  else:
-    # check out the baseline model
-    weights_dir = f'{object_name}_C{16}_P{0}_weights'
-    vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
+if 'C96_P8' in weights_dir:
+  prune_list = [0,16,32,48,64,80]
+elif 'C64_P5' in weights_dir:
+  prune_list = [0,16,32,48]
+else:
+  exit(1)
+for pruned in prune_list:
+  vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
 
 
   # sample image
   rays = camera_ray_batch(data['test']['c2w'][selected_test_index], data['test']['hwf'])
   gt = data['test']['images'][selected_test_index]
-  if pruned >= 0:
-    out = render_loop(rays, vars, test_batch_size, pruned)
-  else:
-    out = render_loop(rays, vars, test_batch_size, 0)
+  out = render_loop(rays, vars, test_batch_size, prune_chan=pruned, mlp_prec=8)
   rgb_b = out[0]
   acc_b = out[1]
-  psnrs_b_test.append(-10 * np.log10(np.mean(np.square(rgb_b - gt))))
-  iters_test.append(i)
 
 
-  write_floatpoint_image(samples_dir+f"/s4_C{pruned}_"+str(i)+"_rgb_binarized.png",rgb_b)
+  write_floatpoint_image(samples_dir+f"/s4_C{pruned}_rgb_binarized.png",rgb_b)
   gc.collect()
 
   test_iter = tqdm(data['test']['c2w'][:len(data['test']['images'])])
@@ -1692,10 +1699,7 @@ for pruned in [0,48,80,88,92,-1]:
   ssim_module = AverageMeter()
   lpips_module = AverageMeter()
   for i, p in enumerate(test_iter):
-    if pruned >= 0:
-      out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, pruned)
-    else:
-      out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, 0)
+    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, prune_chan=pruned, mlp_prec=8)
 
     # PSNR
     psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
@@ -1706,14 +1710,152 @@ for pruned in [0,48,80,88,92,-1]:
     ssim_module.update(float(ssim))
 
     # Calculate the LPIPS metric
-    lpips_value = loss_fn_alex(out[0].unsqueeze(0), data['test']['images'][i].unsqueeze(0))
+    im1 = torch.tensor(numpy.array(out[0])).unsqueeze(0).permute(0, 3, 1, 2)
+    im2 = torch.tensor(numpy.array(data['test']['images'][i])).unsqueeze(0).permute(0, 3, 1, 2)
+    lpips_value = loss_fn_alex(im1, im2)
     lpips_module.update(float(lpips_value))
 
     # display
     test_iter.set_description(
-      f"Test I:{i}. Prune:{pruned}. "
+      f"Test Prune:{pruned}. "
       f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
       f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
       f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
-  with open(samples_dir+"/"+"multi_channel.log",'a+') as f:
+  with open(weights_dir+"/"+"multi_channel.log",'a+') as f:
     f.write(f"{pruned},{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")
+
+#%% --------------------------------------------------------------------------------
+# ## Main rendering functions
+#%%
+def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng, prune_chan=0, mlp_prec=0): ### antialiasing by supersampling
+
+  #---------- ray-plane intersection points
+  grid_indices, grid_masks = gridcell_from_rays(rays, vars[1], keep_num, threshold)
+
+  pts, grid_masks, points, fake_t = compute_undc_intersection(vars[0],
+                        grid_indices, grid_masks, rays, keep_num)
+
+  if scene_type=="forwardfacing":
+    fake_t = compute_t_forwardfacing(pts,grid_masks)
+  elif scene_type=="real360":
+    skybox_positions, skybox_masks = compute_box_intersection(rays)
+    pts = np.concatenate([pts,skybox_positions], axis=-2)
+    grid_masks = np.concatenate([grid_masks,skybox_masks], axis=-1)
+    pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
+
+  # Now use the MLP to compute density and features
+  mlp_alpha = density_model.apply(vars[2], pts)
+  mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
+  mlp_alpha = mlp_alpha * grid_masks
+
+  mlp_alpha_b = (mlp_alpha>0.5).astype(mlp_alpha.dtype) #no gradient to density
+  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b) #[N,4,P]
+  acc_b = np.sum(weights_b, axis=-1) #[N,4]
+  acc_b = np.mean(acc_b, axis=-1) #[N]
+
+  acc_b = jax.lax.stop_gradient(acc_b)
+
+  #deferred features
+  mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[3], pts)) #[N,4,P,C]
+
+  # apply different bitwidth
+  mult = 2**(8 - mlp_prec)
+  mlp_features_ = np.round(mlp_features_*255).astype(mlp_features_.dtype)//mult*mult/255.
+
+  mlp_features_b = np.sum(weights_b[..., None] * mlp_features_, axis=-2) #[N,4,C]
+  mlp_features_b = np.mean(mlp_features_b, axis=-2) #[N,C]
+
+  # ... as well as view-dependent colors.
+  dirs = normalize(rays[1]) #[N,4,3]
+  dirs = np.mean(dirs, axis=-2) #[N,3]
+  features_dirs_enc_b = np.concatenate([mlp_features_b, dirs], axis=-1) #[N,C+3]
+
+  features_dirs_enc_b = jax.lax.stop_gradient(features_dirs_enc_b)
+
+  # pruned version
+  if onn:
+    tmp_mlp = apply_prune(vars[4],prune_chan=prune_chan)
+    rgb_b = jax.nn.sigmoid(color_model.apply(tmp_mlp, features_dirs_enc_b))
+  else:
+    rgb_b = jax.nn.sigmoid(color_model.apply(vars[4], features_dirs_enc_b))
+
+  # Composite onto the background color.
+  if white_bkgd:
+    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None])
+  else:
+    bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
+          bg_color * (1-wbgcolor)
+    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
+
+  return rgb_b, acc_b
+
+render_test_p = jax.pmap(lambda rays, vars, prune_chan, mlp_prec: render_rays(
+    rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng, prune_chan, mlp_prec),
+    in_axes=(0, None, None, None))
+
+def render_test(rays, vars, prune_chan, mlp_prec): ### antialiasing by supersampling
+  sh = rays[0].shape
+  rays = [x.reshape((jax.local_device_count(), -1) + sh[1:]) for x in rays]
+  out = render_test_p(rays, vars, prune_chan, mlp_prec)
+  out = [numpy.reshape(numpy.array(out[i]),sh[:-2]+(-1,)) for i in range(2)]
+  return out
+
+def render_loop(rays, vars, chunk, prune_chan=0, mlp_prec=0): ### antialiasing by supersampling
+  sh = list(rays[0].shape[:-2])
+  rays = [x.reshape([-1, 4, 3]) for x in rays]
+  l = rays[0].shape[0]
+  n = jax.local_device_count()
+  p = ((l - 1) // n + 1) * n - l
+  rays = [np.pad(x, ((0,p),(0,0),(0,0))) for x in rays]
+  outs = [render_test([x[i:i+chunk] for x in rays], vars, prune_chan, mlp_prec)
+          for i in range(0, rays[0].shape[0], chunk)]
+  outs = [np.reshape(
+      np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(2)]
+  return outs
+
+eval_baseline = True
+channel_width = 16
+color_model = MLP([channel_width,channel_width,3])
+if eval_baseline:
+  # check out the baseline model
+  weights_dir = f'{object_name}_C{16}_P{0}_weights'
+  vars = pickle.load(open(weights_dir+"/"+"weights_stage2_1.pkl", "rb"))
+
+  # sample image
+  rays = camera_ray_batch(data['test']['c2w'][selected_test_index], data['test']['hwf'])
+  gt = data['test']['images'][selected_test_index]
+  out = render_loop(rays, vars, test_batch_size, prune_chan=0, mlp_prec=8)
+  rgb_b = out[0]
+
+  write_floatpoint_image(samples_dir+f"/s4_C_rgb_binarized.png",rgb_b)
+  gc.collect()
+
+  test_iter = tqdm(data['test']['c2w'][:len(data['test']['images'])])
+  psnr_module = AverageMeter()
+  ssim_module = AverageMeter()
+  lpips_module = AverageMeter()
+  for i, p in enumerate(test_iter):
+    out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size, prune_chan=0, mlp_prec=8)
+
+    # PSNR
+    psnr = -10 * np.log10(np.mean(np.square(out[0] - data['test']['images'][i])))
+    psnr_module.update(float(psnr))
+    
+    # SSIM
+    ssim = ssim_fn(out[0], data['test']['images'][i])
+    ssim_module.update(float(ssim))
+
+    # Calculate the LPIPS metric
+    im1 = torch.tensor(numpy.array(out[0])).unsqueeze(0).permute(0, 3, 1, 2)
+    im2 = torch.tensor(numpy.array(data['test']['images'][i])).unsqueeze(0).permute(0, 3, 1, 2)
+    lpips_value = loss_fn_alex(im1, im2)
+    lpips_module.update(float(lpips_value))
+
+    # display
+    test_iter.set_description(
+      f"Test Baseline. "
+      f"PSNR:{psnr_module.val:.2f} ({psnr_module.avg:.2f}). "
+      f"SSIM:{ssim_module.val:.4f} ({ssim_module.avg:.4f}). "
+      f"LPIPS:{lpips_module.val:.4f} ({lpips_module.avg:.4f}). ")
+  with open(prefix + "weights/multi_channel.log",'a+') as f:
+    f.write(f"-1,{psnr_module.avg:.2f},{ssim_module.avg:.4f},{lpips_module.avg:.4f}\n")

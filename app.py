@@ -7,6 +7,10 @@ import glob,os
 import subprocess
 import socket,pickle
 import cv2
+from multiprocessing.connection import Client
+
+os.environ['FLASK_ENV'] = 'production'
+
 
 app = Flask(__name__)
 cors = CORS(app)
@@ -20,25 +24,49 @@ def send_message():
     # retrieve image
     return "Message received and sent!"
 
-@app.route('/save_images', methods=['POST'])
-def save_images():
+@app.route('/save_fps', methods=['POST'])
+def save_fps():
+    try:
+        data = request.json
+        fps = data.get('fps')
+        with open('fps.log','a+') as f:
+            f.write(fps+'\n')
+        return jsonify({"result": f"FPS logged."})
+    except Exception as e:
+        return str(e), 500
+    
+@app.route('/save_results', methods=['POST'])
+def save_results():
     try:
         images = request.files.getlist('images')
         prefix = request.form['prefix']
+        object = request.form['object']
+        channel = request.form['channel']
+        load_time = request.form['load_time']
+        fps = request.form['fps']
         for i, image_data in enumerate(images):
-            image_data.save(f'profiling/{prefix}{i+1}.png')
+            image_data.save(f'profiling_cache/{prefix}{i+1}.png')
+        # only log when measuing the downloading time
+        if float(fps) > 0:
+            with open('metrics.log','a+') as f:
+                f.write(f'{object},{channel},{load_time},{fps}\n')
     except Exception as e:
         return str(e), 500
     
     # Assuming you have some data to send
-    data_to_send = {'message': 'Image saved.'}
+    data_to_send = {'message': 'Results saved.'}
 
-    # Set up a socket connection to communicate with the other Python program
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect(('localhost', 8001))  # Adjust IP and port as needed
-        s.sendall(pickle.dumps(data_to_send))
+    address = ('localhost', 8015)
+    conn = Client(address, authkey=b'secret password')
+    conn.send(pickle.dumps(data_to_send))
+    conn.close()
 
-    return 'Image saved successfully', 200
+    # # Set up a socket connection to communicate with the other Python program
+    # with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #     s.connect(('localhost', 8015))  # Adjust IP and port as needed
+    #     s.sendall(pickle.dumps(data_to_send))
+
+    return 'Results saved successfully', 200
 
 # Define the directory you want to serve
 directory_path = './'
@@ -218,4 +246,4 @@ def draco_request():
 
 
 if __name__ == '__main__':
-    app.run(debug=True,host='130.126.139.208',port=8000)
+    app.run(debug=False,host='130.126.139.208',port=8000)
